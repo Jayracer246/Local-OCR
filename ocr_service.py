@@ -34,6 +34,27 @@ class OCRServiceError(Exception):
     """A service operation (Ollama, PDF rendering, saving) failed."""
 
 
+class OCRCancelled(Exception):
+    """The user stopped the job. Deliberately NOT an OCRServiceError.
+
+    Cancellation is a normal outcome, not a failure: it must not surface as
+    an error dialog, and it must not be swallowed by the broad ``except
+    Exception`` handlers that wrap genuine faults with diagnostic context.
+    """
+
+
+def _raise_if_cancelled(cancel_event) -> None:
+    """Cooperative cancellation checkpoint.
+
+    Threads cannot be interrupted safely in Python, so every long-running
+    loop polls this instead. Checkpoints sit between pages and between
+    stream chunks — the two places the worker reliably passes through — so a
+    cancel takes effect within one chunk rather than at the end of the job.
+    """
+    if cancel_event is not None and cancel_event.is_set():
+        raise OCRCancelled()
+
+
 @dataclass(frozen=True)
 class OCRRequest:
     """Immutable snapshot of everything an OCR worker needs."""
@@ -255,9 +276,30 @@ def validate_input_path(path: Path) -> None:
             )
 
 
-def build_output_path(input_path: Path) -> Path:
-    """Return /dir/document_extracted.md for /dir/document.<ext>."""
-    return input_path.with_name(f"{input_path.stem}_extracted.md")
+def build_output_path(input_path: Path, output_dir: Path | None = None) -> Path:
+    """Return the Markdown path for an input, optionally in a chosen folder.
+
+    Defaults to beside the input — /dir/document_extracted.md for
+    /dir/document.<ext> — which is convenient but means scanning a file that
+    lives in Dropbox, OneDrive, iCloud Drive or a Syncthing folder puts the
+    recognized text in that folder too, where the sync client uploads it.
+    File permissions do not help: the sync client runs as the same user.
+    Passing output_dir sends the result somewhere the user chose instead.
+    """
+    name = f"{input_path.stem}_extracted.md"
+    if output_dir is None:
+        return input_path.with_name(name)
+    return output_dir / name
+
+
+def validate_output_dir(path: Path) -> None:
+    """Raise ValueError unless path is a directory we can write into."""
+    if not path.exists():
+        raise ValueError(f"Folder does not exist: {path}")
+    if not path.is_dir():
+        raise ValueError(f"Not a folder: {path}")
+    if not os.access(path, os.W_OK | os.X_OK):
+        raise ValueError(f"Folder is not writable: {path}")
 
 
 def make_client(url: str, timeout: int) -> "ollama.Client":
@@ -419,6 +461,7 @@ def iter_pdf_pages(
     pdf_path: Path,
     dpi: int,
     log_callback: LogCallback,
+    cancel_event=None,
 ) -> Iterator[PageImage]:
     """Yield each PDF page as PNG bytes, lazily, in original page order.
 
@@ -461,6 +504,7 @@ def iter_pdf_pages(
                 "documents and run them separately."
             )
         for index in range(page_count):
+            _raise_if_cancelled(cancel_event)
             page_number = index + 1
             log_callback(f"Rendering page {page_number}/{page_count}...")
             try:
@@ -532,6 +576,7 @@ def recognize_images(
     log_callback: LogCallback,
     progress_callback: ProgressCallback | None = None,
     event_callback: EventCallback | None = None,
+    cancel_event=None,
 ) -> list[str]:
     """Send one independent chat request per page; return texts in order.
 
@@ -548,6 +593,7 @@ def recognize_images(
     """
     results: list[str] = []
     for page in pages:
+        _raise_if_cancelled(cancel_event)
         number, total = page.number, page.total
         if progress_callback is not None:
             progress_callback("ocr", number, total)
@@ -583,6 +629,7 @@ def recognize_images(
                 stream=True,
             )
             for chunk in stream:
+                _raise_if_cancelled(cancel_event)
                 delta = (getattr(getattr(chunk, "message", None), "content", None)
                          or "")
                 if delta:
@@ -592,6 +639,8 @@ def recognize_images(
                             "stream_chunk",
                             {"page": number, "text": delta},
                         )
+        except OCRCancelled:
+            raise  # a stopped job is not a request failure
         except Exception as exc:
             raise OCRServiceError(
                 f"Ollama request failed on page {number}/{total} "
@@ -720,10 +769,12 @@ def reveal_in_file_manager(path: Path) -> None:
         raise OCRServiceError(f"Could not reveal {path}: {exc}") from exc
 
 
-def process_ocr(request: OCRRequest, event_queue) -> Path:
+def process_ocr(request: OCRRequest, event_queue, cancel_event=None) -> Path:
     """Run the full OCR pipeline; emit ('log', message) events; return output.
 
-    Raises on any failure.
+    Raises on any failure, and ``OCRCancelled`` if ``cancel_event`` is set
+    while the job runs — checked between pages and between stream chunks, so
+    stopping takes effect promptly and no output file is written.
 
     No page image is ever written to disk: PDF pages are rendered to PNG
     bytes on demand and released as soon as they have been recognized. There
@@ -751,6 +802,7 @@ def process_ocr(request: OCRRequest, event_queue) -> Path:
             request.input_path,
             request.dpi,
             lambda message: log(f"[1/3] {message}"),
+            cancel_event,
         )
     else:
         log("[1/3] Preparing image...")
@@ -769,6 +821,7 @@ def process_ocr(request: OCRRequest, event_queue) -> Path:
         # Confirm Ollama is what is actually listening before handing it a
         # single page. A local process squatting the port would otherwise
         # collect the whole document in silence.
+        _raise_if_cancelled(cancel_event)
         version = verify_ollama_endpoint(client)
         log(f"[1/3] Ollama {version} responding at {request.ollama_url}")
 
@@ -779,8 +832,10 @@ def process_ocr(request: OCRRequest, event_queue) -> Path:
             lambda message: log(f"[2/3] {message}"),
             progress,
             emit_event,
+            cancel_event,
         )
 
+    _raise_if_cancelled(cancel_event)
     log("[3/3] Saving Markdown...")
     content, neutralized = neutralize_remote_media("\n\n".join(page_texts))
     if neutralized:

@@ -3,6 +3,7 @@
 import os
 import queue
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -374,6 +375,121 @@ class TestBuildOutputPath(unittest.TestCase):
             Path("/docs/report.v2_extracted.md"),
         )
 
+    def test_custom_output_dir_used_when_given(self):
+        """Lets the user keep results out of a synced folder."""
+        self.assertEqual(
+            ocr_service.build_output_path(
+                Path("/sync/dropbox/report.pdf"), Path("/private/out")
+            ),
+            Path("/private/out/report_extracted.md"),
+        )
+
+    def test_custom_output_dir_keeps_the_derived_name(self):
+        for name in ("a.pdf", "a.PNG", "two.dots.jpeg"):
+            with self.subTest(name=name):
+                result = ocr_service.build_output_path(
+                    Path("/in") / name, Path("/out")
+                )
+                self.assertEqual(result.parent, Path("/out"))
+                self.assertTrue(result.name.endswith("_extracted.md"))
+
+    def test_none_output_dir_is_the_default_beside_the_input(self):
+        self.assertEqual(
+            ocr_service.build_output_path(Path("/docs/r.pdf"), None),
+            ocr_service.build_output_path(Path("/docs/r.pdf")),
+        )
+
+
+class TestValidateOutputDir(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+
+    def test_writable_directory_accepted(self):
+        ocr_service.validate_output_dir(self.dir)
+
+    def test_missing_directory_rejected(self):
+        with self.assertRaisesRegex(ValueError, "does not exist"):
+            ocr_service.validate_output_dir(self.dir / "nope")
+
+    def test_file_rejected(self):
+        path = self.dir / "a.txt"
+        path.write_text("x")
+        with self.assertRaisesRegex(ValueError, "Not a folder"):
+            ocr_service.validate_output_dir(path)
+
+    @unittest.skipIf(
+        os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+        "chmod-based unwritability is not enforced for root or on Windows",
+    )
+    def test_unwritable_directory_rejected(self):
+        locked = self.dir / "locked"
+        locked.mkdir()
+        locked.chmod(0o500)
+        self.addCleanup(locked.chmod, 0o700)
+        with self.assertRaisesRegex(ValueError, "not writable"):
+            ocr_service.validate_output_dir(locked)
+
+class TestMakeClient(unittest.TestCase):
+    def test_redirects_disabled(self):
+        """A loopback URL is not enough on its own.
+
+        ollama.Client defaults to follow_redirects=True, so anything
+        listening on the port could answer 3xx and have httpx re-send the
+        page image to an external host. The lock only holds with redirects
+        off, so assert it explicitly.
+        """
+        with mock.patch.object(ocr_service.ollama, "Client") as client_cls:
+            ocr_service.make_client("http://localhost:11434", 30)
+        client_cls.assert_called_once_with(
+            host="http://localhost:11434",
+            timeout=30,
+            follow_redirects=False,
+            trust_env=False,
+        )
+
+    def test_real_client_has_redirects_disabled(self):
+        """Guard against the kwarg being silently dropped upstream."""
+        client = ocr_service.make_client("http://localhost:11434", 30)
+        self.assertFalse(client._client.follow_redirects)
+
+    def test_proxy_env_cannot_route_loopback_traffic_off_box(self):
+        """httpx proxy handling has no loopback exemption.
+
+        With trust_env left on, HTTP_PROXY/ALL_PROXY route even
+        http://localhost:11434 through a remote proxy, carrying the page
+        image with it. No attacker input is required — one env var, or a
+        system-wide proxy on macOS/Windows, is enough.
+        """
+        proxy_env = {
+            "HTTP_PROXY": "http://198.51.100.7:3128",
+            "ALL_PROXY": "http://198.51.100.7:3128",
+        }
+        for url in (
+            "http://localhost:11434",
+            "http://127.0.0.1:11434",
+            "http://[::1]:11434",
+        ):
+            with self.subTest(url=url):
+                with mock.patch.dict(os.environ, proxy_env, clear=False):
+                    client = ocr_service.make_client(url, 30)
+                    transport = client._client._transport_for_url(
+                        httpx.URL(url)
+                    )
+                pool = getattr(transport, "_pool", None)
+                self.assertIsNone(
+                    getattr(pool, "_proxy_url", None),
+                    f"{url} was routed through a proxy despite being loopback",
+                )
+
+    def test_non_loopback_url_rejected_at_client_construction(self):
+        """The guarantee lives in make_client, not only at the UI call sites."""
+        for url in ("http://evil.example.com:11434", "http://192.168.1.5:11434"):
+            with self.subTest(url=url):
+                with self.assertRaises(ValueError):
+                    ocr_service.make_client(url, 30)
+
 
 class TestListModels(unittest.TestCase):
     URL = "http://localhost:11434"
@@ -667,6 +783,80 @@ class TestVerifyOllamaEndpoint(unittest.TestCase):
         client._client.get.side_effect = ConnectionError("refused")
         with self.assertRaisesRegex(OCRServiceError, "No response"):
             ocr_service.verify_ollama_endpoint(client)
+
+
+class TestCancellation(unittest.TestCase):
+    def test_checkpoint_raises_only_when_set(self):
+        event = threading.Event()
+        ocr_service._raise_if_cancelled(None)      # no event at all
+        ocr_service._raise_if_cancelled(event)     # not set
+        event.set()
+        with self.assertRaises(ocr_service.OCRCancelled):
+            ocr_service._raise_if_cancelled(event)
+
+    def test_cancelled_is_not_a_service_error(self):
+        """So it never surfaces as a failure dialog or gets rewrapped."""
+        self.assertFalse(issubclass(ocr_service.OCRCancelled, OCRServiceError))
+
+    def test_stops_between_pages_and_writes_nothing(self):
+        event = threading.Event()
+        client = mock.MagicMock()
+        seen = []
+
+        def chat(*_a, **_kw):
+            seen.append(1)
+            if len(seen) == 2:
+                event.set()          # user clicks Cancel during page 2
+            return stream_response("text")
+
+        client.chat.side_effect = chat
+        with self.assertRaises(ocr_service.OCRCancelled):
+            ocr_service.recognize_images(
+                client, "m", pages(10), lambda _m: None, cancel_event=event
+            )
+        # Stopped promptly rather than finishing all ten pages.
+        self.assertEqual(len(seen), 2)
+
+    def test_stops_mid_stream(self):
+        """Cancellation lands within one chunk, not at the end of the page."""
+        event = threading.Event()
+        chunks_seen = []
+
+        def long_stream():
+            for i in range(1000):
+                chunks_seen.append(i)
+                if i == 3:
+                    event.set()
+                yield SimpleNamespace(message=SimpleNamespace(content=f"c{i}"))
+
+        client = mock.MagicMock()
+        client.chat.return_value = long_stream()
+        with self.assertRaises(ocr_service.OCRCancelled):
+            ocr_service.recognize_images(
+                client, "m", pages(1), lambda _m: None, cancel_event=event
+            )
+        self.assertLess(len(chunks_seen), 10)
+
+    def test_renderer_stops_between_pages(self):
+        event = threading.Event()
+        document = make_fake_document(50)
+        rendered = []
+
+        def load_page(index):
+            rendered.append(index)
+            if len(rendered) == 3:
+                event.set()
+            return document.fake_pages[index]
+
+        document.load_page.side_effect = load_page
+        with mock.patch.object(ocr_service, "pymupdf") as fake_pymupdf:
+            fake_pymupdf.open.return_value = document
+            with self.assertRaises(ocr_service.OCRCancelled):
+                list(ocr_service.iter_pdf_pages(
+                    Path("/d.pdf"), 150, lambda _m: None, event
+                ))
+        self.assertEqual(len(rendered), 3)
+        self.assertTrue(document.__exit__.called)
 
 
 class TestPageAreaCap(unittest.TestCase):

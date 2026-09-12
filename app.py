@@ -56,7 +56,15 @@ class LocalOCRApp(ctk.CTk):
         self.operation_state = OperationState.IDLE
         self.closing = False
         self.selected_path: Path | None = None
+        # None means "beside the input file" (the default). Set to a Path to
+        # send results somewhere else — useful when the document lives in a
+        # synced folder and you would rather the text did not.
+        self.output_dir: Path | None = None
         self.event_queue: queue.Queue = queue.Queue()
+        # Set to ask a running worker to stop. Replaced (not cleared) for
+        # each job so a late cancel from a previous run can never affect the
+        # next one.
+        self.cancel_event = threading.Event()
         self._render_phase_seen = False
 
         # Stream-chunk throttling: chunks arrive frequently; buffer them and
@@ -113,19 +121,33 @@ class LocalOCRApp(ctk.CTk):
         )
         self.refresh_button.grid(row=0, column=2, padx=(0, PADX), pady=(PADY, 4))
 
+        # Say the constraint up front so a rejected LAN address is not a
+        # surprise: the port is adjustable, the host is not.
+        self.url_hint = ctk.CTkLabel(
+            settings,
+            text="This machine only — localhost or 127.0.0.1. "
+                 "Change the port if your Ollama uses a different one.",
+            anchor="w",
+            font=ctk.CTkFont(size=11),
+            text_color=("gray45", "gray60"),
+        )
+        self.url_hint.grid(
+            row=1, column=1, columnspan=2, sticky="ew", padx=(0, PADX), pady=(0, 4)
+        )
+
         ctk.CTkLabel(settings, text="Model").grid(
-            row=1, column=0, sticky="w", padx=PADX, pady=4
+            row=2, column=0, sticky="w", padx=PADX, pady=4
         )
         self.model_combobox = ctk.CTkComboBox(
             settings, values=list(config.EXAMPLE_MODELS)
         )
         self.model_combobox.set("")  # suggestions are not installed models
         self.model_combobox.grid(
-            row=1, column=1, columnspan=2, sticky="ew", padx=(0, PADX), pady=4
+            row=2, column=1, columnspan=2, sticky="ew", padx=(0, PADX), pady=4
         )
 
         ctk.CTkLabel(settings, text="PDF DPI").grid(
-            row=2, column=0, sticky="w", padx=PADX, pady=(4, PADY)
+            row=3, column=0, sticky="w", padx=PADX, pady=(4, PADY)
         )
         self.dpi_combobox = ctk.CTkComboBox(
             settings,
@@ -134,7 +156,30 @@ class LocalOCRApp(ctk.CTk):
             width=120,
         )
         self.dpi_combobox.set(str(config.DEFAULT_DPI))
-        self.dpi_combobox.grid(row=2, column=1, sticky="w", pady=(4, PADY))
+        self.dpi_combobox.grid(row=3, column=1, sticky="w", pady=(4, PADY))
+
+        ctk.CTkLabel(settings, text="Save to").grid(
+            row=4, column=0, sticky="w", padx=PADX, pady=(0, PADY)
+        )
+        destination_row = ctk.CTkFrame(settings, fg_color="transparent")
+        destination_row.grid(
+            row=4, column=1, columnspan=2, sticky="ew", padx=(0, PADX),
+            pady=(0, PADY),
+        )
+        destination_row.grid_columnconfigure(0, weight=1)
+        self.output_label = ctk.CTkLabel(destination_row, text="", anchor="w")
+        self.output_label.grid(row=0, column=0, sticky="ew")
+        self.output_choose_button = ctk.CTkButton(
+            destination_row, text="Change...", width=90,
+            command=self.choose_output_dir,
+        )
+        self.output_choose_button.grid(row=0, column=1, padx=(8, 0))
+        self.output_reset_button = ctk.CTkButton(
+            destination_row, text="Reset", width=70, state="disabled",
+            command=self.reset_output_dir,
+        )
+        self.output_reset_button.grid(row=0, column=2, padx=(6, 0))
+        self._update_output_label()
 
         # Action + feedback section
         self.start_button = ctk.CTkButton(
@@ -273,6 +318,8 @@ class LocalOCRApp(ctk.CTk):
             self.on_progress(payload)
         elif kind == "ocr_error":
             self.on_ocr_error(payload)
+        elif kind == "ocr_cancelled":
+            self.on_ocr_cancelled()
         elif kind == "page_text":
             self.on_page_text(payload)
         elif kind == "page_image":
@@ -429,8 +476,12 @@ class LocalOCRApp(ctk.CTk):
         self.refresh_button.configure(state="disabled")
         self.model_combobox.configure(state="disabled")
         self.dpi_combobox.configure(state="disabled")
+        self.output_choose_button.configure(state="disabled")
+        self.output_reset_button.configure(state="disabled")
+        # The primary button becomes the stop control: an inert "please
+        # wait" button is exactly where a user reaches to abort.
         self.start_button.configure(
-            state="disabled", text="Processing, please wait..."
+            state="normal", text="Cancel", command=self.cancel_ocr
         )
         self._render_phase_seen = False
         self._clear_result_panel()
@@ -447,7 +498,11 @@ class LocalOCRApp(ctk.CTk):
         self.refresh_button.configure(state="normal")
         self.model_combobox.configure(state="normal")
         self.dpi_combobox.configure(state="readonly")
-        self.start_button.configure(state="normal", text="Start OCR")
+        self.output_choose_button.configure(state="normal")
+        self._update_output_label()  # restores the Reset button's state
+        self.start_button.configure(
+            state="normal", text="Start OCR", command=self.start_ocr
+        )
         self.progress.stop()
         self.progress.configure(mode="indeterminate")
         self.progress.set(0)
@@ -477,6 +532,42 @@ class LocalOCRApp(ctk.CTk):
         self.selected_path = path
         self.file_label.configure(text=path.name)
 
+    def _update_output_label(self) -> None:
+        if self.output_dir is None:
+            self.output_label.configure(
+                text="Same folder as the input file",
+                text_color=("gray45", "gray60"),
+            )
+            self.output_reset_button.configure(state="disabled")
+        else:
+            self.output_label.configure(
+                text=str(self.output_dir), text_color=("gray10", "gray90")
+            )
+            self.output_reset_button.configure(state="normal")
+
+    def choose_output_dir(self) -> None:
+        if self.operation_state is not OperationState.IDLE:
+            return
+        chosen = filedialog.askdirectory(
+            title="Save recognized text to", parent=self, mustexist=True
+        )
+        if not chosen:
+            return  # cancelled: keep the current destination
+        path = Path(chosen)
+        try:
+            ocr_service.validate_output_dir(path)
+        except ValueError as exc:
+            messagebox.showerror("Cannot use that folder", str(exc), parent=self)
+            return
+        self.output_dir = path
+        self._update_output_label()
+
+    def reset_output_dir(self) -> None:
+        if self.operation_state is not OperationState.IDLE:
+            return
+        self.output_dir = None
+        self._update_output_label()
+
     # ------------------------------------------------------ model refresh
 
     def refresh_models(self) -> None:
@@ -485,7 +576,7 @@ class LocalOCRApp(ctk.CTk):
         try:
             url = ocr_service.normalize_ollama_url(self.url_entry.get())
         except ValueError as exc:
-            messagebox.showerror("Invalid URL", str(exc), parent=self)
+            messagebox.showerror("Ollama server URL", str(exc), parent=self)
             return
         self.operation_state = OperationState.REFRESHING_MODELS
         self._apply_refresh_busy_state()
@@ -610,7 +701,7 @@ class LocalOCRApp(ctk.CTk):
         try:
             url = ocr_service.normalize_ollama_url(self.url_entry.get())
         except ValueError as exc:
-            messagebox.showerror("Invalid URL", str(exc), parent=self)
+            messagebox.showerror("Ollama server URL", str(exc), parent=self)
             return
         model = self.model_combobox.get().strip()
         if not model:
@@ -629,12 +720,19 @@ class LocalOCRApp(ctk.CTk):
             )
             return
 
-        output_path = ocr_service.build_output_path(input_path)
+        if self.output_dir is not None:
+            try:
+                ocr_service.validate_output_dir(self.output_dir)
+            except ValueError as exc:
+                messagebox.showerror(
+                    "Cannot use that folder", str(exc), parent=self
+                )
+                return
+        output_path = ocr_service.build_output_path(input_path, self.output_dir)
         if output_path.exists():
             overwrite = messagebox.askyesno(
                 "Overwrite existing file?",
-                f"{output_path.name} already exists in the same folder.\n"
-                "Overwrite it?",
+                f"{output_path} already exists.\nOverwrite it?",
                 parent=self,
             )
             if not overwrite:
@@ -648,23 +746,41 @@ class LocalOCRApp(ctk.CTk):
             dpi=dpi,
         )
         self.operation_state = OperationState.PROCESSING_OCR
+        self.cancel_event = threading.Event()
         self._apply_ocr_busy_state()
         self.append_log(f"[Start] Input: {input_path}")
         self.append_log(f"[Start] Ollama: {url} | Model: {model}")
         threading.Thread(
-            target=self._ocr_worker, args=(request,), daemon=True
+            target=self._ocr_worker,
+            args=(request, self.cancel_event),
+            daemon=True,
         ).start()
 
-    def _ocr_worker(self, request: OCRRequest) -> None:
+    def cancel_ocr(self) -> None:
+        """Ask the worker to stop at its next checkpoint."""
+        if self.operation_state is not OperationState.PROCESSING_OCR:
+            return
+        self.cancel_event.set()
+        self.start_button.configure(state="disabled", text="Cancelling...")
+        self.append_log("[Cancel] Stopping after the current page...")
+
+    def _ocr_worker(self, request: OCRRequest, cancel_event) -> None:
         saved_path = None
         error: Exception | None = None
+        cancelled = False
         try:
-            saved_path = ocr_service.process_ocr(request, self.event_queue)
+            saved_path = ocr_service.process_ocr(
+                request, self.event_queue, cancel_event
+            )
+        except ocr_service.OCRCancelled:
+            cancelled = True
         except Exception as exc:
             error = exc
-        # process_ocr's finally has already cleaned up temporary files;
-        # now enqueue exactly one terminal event.
-        if error is not None:
+        # Exactly one terminal event, and a user-initiated stop is reported
+        # as its own outcome so it never raises an error dialog.
+        if cancelled:
+            self.event_queue.put(("ocr_cancelled", None))
+        elif error is not None:
             self.event_queue.put(("ocr_error", str(error)))
         else:
             self.event_queue.put(("ocr_success", str(saved_path)))
@@ -731,6 +847,15 @@ class LocalOCRApp(ctk.CTk):
             self.append_log(f"[Error] {exc}")
             messagebox.showerror("Action failed", str(exc), parent=self)
 
+    def on_ocr_cancelled(self) -> None:
+        """A stopped job is a normal outcome: no dialog, no output file."""
+        self._flush_stream_buffer()
+        self._restore_idle()
+        self.append_log(
+            "[Cancelled] Stopped by you. No output file was written."
+        )
+        self.tabview.set("Log")
+
     def on_ocr_error(self, message: str) -> None:
         self._flush_stream_buffer()
         self._restore_idle()
@@ -749,4 +874,5 @@ class LocalOCRApp(ctk.CTk):
             "Quit", "An operation is still running. Close anyway?", parent=self
         ):
             self.closing = True
+            self.cancel_event.set()  # let the worker unwind instead of racing
             self.destroy()

@@ -1,4 +1,20 @@
+# Supported version ranges. For a reproducible install use the pinned set:
+#     pip install -r requirements.lock
+#
+# Floors here are security floors, not taste. Do not lower them without
+# checking `pip-audit -r requirements.txt` first; CI runs exactly that.
+#
+# Pillow: 12.3.0 is the first release carrying the fixes for the PSD, GD,
+# JPEG2000 and raw/mmap decoder advisories. The app hands attacker-supplied
+# image files straight to Pillow, so every one of those decoders is
+# reachable. An upper bound of <12 (as previously pinned) excludes all of
+# those fixes — never cap below the current major.
 customtkinter>=6.0.0,<7
-Pillow>=10,<12
-PyMuPDF>=1.24.0
-ollama>=0.4.0
+Pillow>=12.3.0,<13
+PyMuPDF>=1.28.2,<2
+ollama>=0.6.2,<1
+
+# Already a transitive dependency of ollama, declared explicitly because
+# ocr_service imports it directly to validate URLs with the same parser the
+# HTTP client will use.
+httpx>=0.28.1,<1

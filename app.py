@@ -113,19 +113,33 @@ class LocalOCRApp(ctk.CTk):
         )
         self.refresh_button.grid(row=0, column=2, padx=(0, PADX), pady=(PADY, 4))
 
+        # Say the constraint up front so a rejected LAN address is not a
+        # surprise: the port is adjustable, the host is not.
+        self.url_hint = ctk.CTkLabel(
+            settings,
+            text="This machine only — localhost or 127.0.0.1. "
+                 "Change the port if your Ollama uses a different one.",
+            anchor="w",
+            font=ctk.CTkFont(size=11),
+            text_color=("gray45", "gray60"),
+        )
+        self.url_hint.grid(
+            row=1, column=1, columnspan=2, sticky="ew", padx=(0, PADX), pady=(0, 4)
+        )
+
         ctk.CTkLabel(settings, text="Model").grid(
-            row=1, column=0, sticky="w", padx=PADX, pady=4
+            row=2, column=0, sticky="w", padx=PADX, pady=4
         )
         self.model_combobox = ctk.CTkComboBox(
             settings, values=list(config.EXAMPLE_MODELS)
         )
         self.model_combobox.set("")  # suggestions are not installed models
         self.model_combobox.grid(
-            row=1, column=1, columnspan=2, sticky="ew", padx=(0, PADX), pady=4
+            row=2, column=1, columnspan=2, sticky="ew", padx=(0, PADX), pady=4
         )
 
         ctk.CTkLabel(settings, text="PDF DPI").grid(
-            row=2, column=0, sticky="w", padx=PADX, pady=(4, PADY)
+            row=3, column=0, sticky="w", padx=PADX, pady=(4, PADY)
         )
         self.dpi_combobox = ctk.CTkComboBox(
             settings,
@@ -134,7 +148,8 @@ class LocalOCRApp(ctk.CTk):
             width=120,
         )
         self.dpi_combobox.set(str(config.DEFAULT_DPI))
-        self.dpi_combobox.grid(row=2, column=1, sticky="w", pady=(4, PADY))
+        self.dpi_combobox.grid(row=3, column=1, sticky="w", pady=(4, PADY))
+
 
         # Action + feedback section
         self.start_button = ctk.CTkButton(
@@ -485,7 +500,7 @@ class LocalOCRApp(ctk.CTk):
         try:
             url = ocr_service.normalize_ollama_url(self.url_entry.get())
         except ValueError as exc:
-            messagebox.showerror("Invalid URL", str(exc), parent=self)
+            messagebox.showerror("Ollama server URL", str(exc), parent=self)
             return
         self.operation_state = OperationState.REFRESHING_MODELS
         self._apply_refresh_busy_state()
@@ -610,7 +625,7 @@ class LocalOCRApp(ctk.CTk):
         try:
             url = ocr_service.normalize_ollama_url(self.url_entry.get())
         except ValueError as exc:
-            messagebox.showerror("Invalid URL", str(exc), parent=self)
+            messagebox.showerror("Ollama server URL", str(exc), parent=self)
             return
         model = self.model_combobox.get().strip()
         if not model:
@@ -662,8 +677,7 @@ class LocalOCRApp(ctk.CTk):
             saved_path = ocr_service.process_ocr(request, self.event_queue)
         except Exception as exc:
             error = exc
-        # process_ocr's finally has already cleaned up temporary files;
-        # now enqueue exactly one terminal event.
+        # Exactly one terminal event.
         if error is not None:
             self.event_queue.put(("ocr_error", str(error)))
         else:

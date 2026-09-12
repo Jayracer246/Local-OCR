@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly, so a newly published advisory against a pinned dependency
+    # surfaces on its own instead of waiting for the next commit.
+    - cron: "17 6 * * 1"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.10 is the documented minimum; Pillow 12.3 and PyMuPDF 1.28 both
+        # require >=3.10, so this matrix is also the compatibility proof.
+        python-version: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools
+          pip install -r requirements-dev.txt
+
+      - name: Run headless service tests
+        # The GUI tests need a display; the service layer is Tk-free by
+        # design and carries the security-relevant logic.
+        run: pytest tests/test_ocr_service.py -v
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install pip-audit
+        run: |
+          python -m pip install --upgrade pip setuptools
+          pip install pip-audit
+
+      - name: Audit declared version ranges
+        # Audits what a fresh `pip install -r requirements.txt` would resolve
+        # to. This is the check that would have caught the Pillow<12 cap
+        # silently excluding every available fix.
+        run: pip-audit --strict -r requirements.txt
+
+      - name: Audit the pinned lockfile
+        run: pip-audit --strict -r requirements.lock

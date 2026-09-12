@@ -44,7 +44,7 @@ class TestProgressBarGui(unittest.TestCase):
 
     def test_render_phase_label(self):
         self._progress("render", 2, 12)
-        self.assertEqual(self.app.status_label.cget("text"), "Page 2 / 12 (Render)")
+        self.assertEqual(self.app.status_label.cget("text"), "Page 2 of 12")
 
     def test_ocr_phase_after_render(self):
         """ocr phase following a render phase: 0.2 + 0.8 * current / total."""
@@ -67,7 +67,7 @@ class TestProgressBarGui(unittest.TestCase):
 
     def test_ocr_phase_label(self):
         self._progress("ocr", 3, 12)
-        self.assertEqual(self.app.status_label.cget("text"), "Page 3 / 12 (OCR)")
+        self.assertEqual(self.app.status_label.cget("text"), "Page 3 of 12")
 
     def test_first_progress_stops_indeterminate(self):
         """_apply_ocr_busy_state starts indeterminate; first on_progress stops it."""

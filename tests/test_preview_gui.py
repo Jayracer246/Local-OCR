@@ -44,14 +44,14 @@ class TestPreviewGui(unittest.TestCase):
     def test_on_page_image_sets_image_and_caption(self):
         self.app.on_page_image({"page": 2, "total": 5, "png": png_bytes()})
         self.assertIsNotNone(self.app._preview_image)
-        self.assertEqual(self.app.preview_caption.cget("text"), "Page 2 / 5")
+        self.assertEqual(self.app.preview_caption.cget("text"), "Page 2 of 5")
 
     def test_busy_state_clears_preview(self):
         self.app.on_page_image({"page": 1, "total": 1, "png": png_bytes()})
         self.assertIsNotNone(self.app._preview_image)
         self.app._apply_ocr_busy_state()
         self.assertIsNone(self.app._preview_image)
-        self.assertEqual(self.app.preview_caption.cget("text"), "")
+        self.assertEqual(self.app.preview_caption.cget("text"), "Page preview")
 
     def test_preview_survives_completion(self):
         """The last page's preview stays after success, until the next run."""

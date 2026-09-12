@@ -846,3 +846,98 @@ def process_ocr(request: OCRRequest, event_queue, cancel_event=None) -> Path:
         )
     save_markdown_atomic(request.output_path, content)
     return request.output_path
+
+
+# ---------------------------------------------------------------- batch
+
+
+@dataclass(frozen=True)
+class BatchOutcome:
+    """What happened to every document in one batch run."""
+
+    completed: list[Path]
+    failures: list[tuple[Path, str]]
+
+    @property
+    def total(self) -> int:
+        return len(self.completed) + len(self.failures)
+
+
+def collect_inputs(paths: Iterable[Path], recursive: bool = False) -> list[Path]:
+    """Expand a mix of files and folders into supported documents, sorted.
+
+    Folders contribute the supported files they contain; anything whose
+    extension is not supported is skipped silently, because a folder full of
+    other things is the normal case rather than an error. Symlinked
+    directories are not followed, so a loop in the tree cannot hang the scan.
+    Duplicates are removed by resolved path, so dropping both a folder and a
+    file inside it processes that file once.
+    """
+    seen: dict[Path, Path] = {}
+    for entry in paths:
+        if entry.is_dir():
+            walker = entry.rglob("*") if recursive else entry.glob("*")
+            for candidate in walker:
+                if (candidate.is_file()
+                        and candidate.suffix.lower() in config.SUPPORTED_EXTENSIONS):
+                    seen.setdefault(candidate.resolve(), candidate)
+        elif entry.is_file() and entry.suffix.lower() in config.SUPPORTED_EXTENSIONS:
+            seen.setdefault(entry.resolve(), entry)
+    return sorted(seen.values(), key=lambda p: str(p).lower())
+
+
+def process_batch(
+    requests: list[OCRRequest],
+    event_queue,
+    cancel_event=None,
+) -> BatchOutcome:
+    """Run several documents in one pass, reporting progress per file.
+
+    One bad document does not end the batch. A corrupt PDF or an image that
+    fails verification is recorded and the run moves to the next file —
+    losing forty finished documents because the forty-first was malformed
+    would be the wrong trade. Cancellation is the exception: it stops
+    everything, because the user asked it to.
+
+    Emits ``file_start`` / ``file_done`` / ``file_failed`` events alongside
+    the per-page events ``process_ocr`` already produces, so the UI can show
+    both "file 3 of 12" and "page 4 of 9" at once.
+    """
+    completed: list[Path] = []
+    failures: list[tuple[Path, str]] = []
+    total = len(requests)
+
+    for index, request in enumerate(requests, start=1):
+        _raise_if_cancelled(cancel_event)
+        event_queue.put((
+            "file_start",
+            {"index": index, "total": total, "name": request.input_path.name},
+        ))
+        try:
+            saved = process_ocr(request, event_queue, cancel_event)
+        except OCRCancelled:
+            raise
+        except Exception as exc:
+            failures.append((request.input_path, str(exc)))
+            event_queue.put((
+                "file_failed",
+                {
+                    "index": index,
+                    "total": total,
+                    "name": request.input_path.name,
+                    "error": str(exc),
+                },
+            ))
+        else:
+            completed.append(saved)
+            event_queue.put((
+                "file_done",
+                {
+                    "index": index,
+                    "total": total,
+                    "name": request.input_path.name,
+                    "output": str(saved),
+                },
+            ))
+
+    return BatchOutcome(completed=completed, failures=failures)

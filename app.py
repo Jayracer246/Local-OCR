@@ -21,6 +21,7 @@ import customtkinter as ctk
 from PIL import Image
 
 import config
+import gpu
 import ocr_service
 import settings as user_settings
 import theme
@@ -46,6 +47,7 @@ except Exception:                                        # pragma: no cover
 class OperationState(Enum):
     IDLE = auto()
     REFRESHING_MODELS = auto()
+    DETECTING_GPUS = auto()
     PROCESSING_OCR = auto()
 
 
@@ -455,8 +457,8 @@ class LocalOCRApp(ctk.CTk, _DND_BASE):
         Built once, up front, and hidden immediately — never destroyed —
         because start_ocr(), _persist() and friends read these widgets
         (model_combobox, appearance_toggle, gpu_mode_segment,
-        gpu_index_entry) regardless of whether this window has ever been
-        opened.
+        gpu_index_entry, gpu_detect_button, gpu_detected_combobox)
+        regardless of whether this window has ever been opened.
         """
         window = ctk.CTkToplevel(self)
         window.title("Settings")
@@ -551,6 +553,28 @@ class LocalOCRApp(ctk.CTk, _DND_BASE):
             font=self._font("ui", theme.SIZE_SMALL), text_color=theme.TEXT_MUTED,
             anchor="w", justify="left", wraplength=440,
         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
+        detect_row = ctk.CTkFrame(index_row, fg_color="transparent")
+        detect_row.grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        self.gpu_detect_button = ctk.CTkButton(
+            detect_row, text="Detect", width=90, height=28,
+            font=self._font("ui", theme.SIZE_SMALL), command=self.detect_gpus,
+        )
+        self.gpu_detect_button.grid(row=0, column=0, sticky="w")
+        self.gpu_detected_combobox = ctk.CTkComboBox(
+            detect_row, values=[], width=280, height=28, font=value_font,
+            command=self._on_gpu_detected_selected,
+        )
+        self.gpu_detected_combobox.set("")
+        self.gpu_detected_combobox.grid(row=0, column=1, sticky="w", padx=(8, 0))
+        ctk.CTkLabel(
+            detect_row,
+            text=("Finds cards via nvidia-smi / rocm-smi / system_profiler, "
+                  "whichever is present. Picking one fills in the index above."),
+            font=self._font("ui", theme.SIZE_SMALL), text_color=theme.TEXT_MUTED,
+            anchor="w", justify="left", wraplength=440,
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
         self._on_gpu_mode_change(persist=False)
 
         # ------------------------------------------------------ DPI guide
@@ -597,7 +621,10 @@ class LocalOCRApp(ctk.CTk, _DND_BASE):
 
     def _on_gpu_mode_change(self, persist: bool = True) -> None:
         is_gpu = self.gpu_mode_segment.get() == config.GPU_MODE_LABELS[config.GPU_MODE_GPU]
-        self.gpu_index_entry.configure(state="normal" if is_gpu else "disabled")
+        state = "normal" if is_gpu else "disabled"
+        self.gpu_index_entry.configure(state=state)
+        self.gpu_detect_button.configure(state=state)
+        self.gpu_detected_combobox.configure(state=state)
         if persist:
             self._persist()
 
@@ -617,6 +644,52 @@ class LocalOCRApp(ctk.CTk, _DND_BASE):
         except ValueError:
             return None
         return value if 0 <= value <= config.MAX_GPU_INDEX else None
+
+    def detect_gpus(self) -> None:
+        if self.operation_state is not OperationState.IDLE:
+            return
+        self.operation_state = OperationState.DETECTING_GPUS
+        self.gpu_detect_button.configure(state="disabled", text="Detecting…")
+        self.append_log("Detecting GPUs...")
+        threading.Thread(target=self._detect_gpus_worker, daemon=True).start()
+
+    def _detect_gpus_worker(self) -> None:
+        try:
+            found = gpu.detect_gpus()
+        except Exception as exc:
+            self.event_queue.put(("gpu_detect_error", str(exc)))
+        else:
+            self.event_queue.put(("gpus_detected", found))
+
+    def on_gpus_detected(self, found: "list[gpu.GPU]") -> None:
+        self.operation_state = OperationState.IDLE
+        self.gpu_detect_button.configure(text="Detect")
+        self._on_gpu_mode_change(persist=False)  # re-sync button/combobox state
+        if not found:
+            self.gpu_detected_combobox.configure(values=[])
+            self.gpu_detected_combobox.set("")
+            self.append_log(
+                "No GPUs detected; enter a GPU index manually if you know it.")
+            return
+        values = [f"{card.index}: {card.name}" for card in found]
+        self.gpu_detected_combobox.configure(values=values)
+        self.gpu_detected_combobox.set(values[0])
+        self.append_log(f"Found {len(found)} GPU(s).")
+
+    def on_gpu_detect_error(self, message: str) -> None:
+        self.operation_state = OperationState.IDLE
+        self.gpu_detect_button.configure(text="Detect")
+        self._on_gpu_mode_change(persist=False)
+        self.append_log(f"[Error] GPU detection failed: {message}")
+
+    def _on_gpu_detected_selected(self, value: str) -> None:
+        index_part = value.split(":", 1)[0].strip()
+        if not index_part.isdigit():
+            return
+        self.gpu_index_entry.configure(state="normal")
+        self.gpu_index_entry.delete(0, "end")
+        self.gpu_index_entry.insert(0, index_part)
+        self._persist()
 
     def open_settings(self) -> None:
         """Show the settings window, raising it if it's already open."""
@@ -881,6 +954,10 @@ class LocalOCRApp(ctk.CTk, _DND_BASE):
             self.on_models_loaded(payload)
         elif kind == "refresh_error":
             self.on_refresh_error(payload)
+        elif kind == "gpus_detected":
+            self.on_gpus_detected(payload)
+        elif kind == "gpu_detect_error":
+            self.on_gpu_detect_error(payload)
         elif kind == "ocr_success":
             self.on_ocr_success(payload)
         elif kind == "progress":
@@ -1150,6 +1227,8 @@ class LocalOCRApp(ctk.CTk, _DND_BASE):
             widget.configure(state="disabled")
         self.dpi_combobox.configure(state="disabled")
         self.gpu_index_entry.configure(state="disabled")
+        self.gpu_detect_button.configure(state="disabled")
+        self.gpu_detected_combobox.configure(state="disabled")
         self.start_button.configure(
             state="normal", text="Cancel", command=self.cancel_ocr)
         self._render_phase_seen = False

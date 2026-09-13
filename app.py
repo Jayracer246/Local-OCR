@@ -135,44 +135,38 @@ class LocalOCRApp(ctk.CTk, _DND_BASE):
             self, fg_color=theme.SURFACE, corner_radius=0)
         self.root_scroll.grid(row=0, column=0, sticky="nsew")
         self.root_scroll.grid_columnconfigure(0, weight=1)
-        self.root_scroll.grid_rowconfigure(5, weight=1)  # tab area absorbs resize
+        self.root_scroll.grid_rowconfigure(4, weight=1)  # tab area absorbs resize
 
         self._build_header()
         self._build_dropzone()
-        self._build_settings()
         self._build_action()
         self._build_progress()
         self._build_panels()
         self._build_settings_window()
 
     def _build_header(self) -> None:
+        # A single compact row rather than a title-plus-subtitle block: the
+        # subtitle was purely decorative, and every pixel here is pixel the
+        # Log/preview area downstairs doesn't get while a job is running.
         header = ctk.CTkFrame(self.root_scroll, fg_color="transparent")
-        header.grid(row=0, column=0, sticky="ew", padx=PAD, pady=(PAD, GAP))
+        header.grid(row=0, column=0, sticky="ew", padx=PAD, pady=(10, 8))
         header.grid_columnconfigure(0, weight=1)
 
         ctk.CTkLabel(
             header, text="Local OCR", anchor="w",
-            font=self._font("heading", theme.SIZE_TITLE, "bold"),
+            font=self._font("heading", theme.SIZE_HEADING, "bold"),
             text_color=theme.TEXT,
         ).grid(row=0, column=0, sticky="w")
 
-        ctk.CTkLabel(
-            header,
-            text="Documents to Markdown, entirely on this machine.",
-            anchor="w",
-            font=self._font("body", theme.SIZE_BODY),
-            text_color=theme.TEXT_MUTED,
-        ).grid(row=1, column=0, sticky="w", pady=(2, 0))
-
         self.settings_button = ctk.CTkButton(
-            header, text="⚙ Settings", width=110, height=34,
+            header, text="⚙ Settings", width=110, height=30,
             font=self._font("ui", theme.SIZE_SMALL),
             fg_color="transparent", border_width=1,
             border_color=theme.FIELD_BORDER, text_color=theme.TEXT,
             hover_color=theme.ACCENT_DIM,
             command=self.open_settings,
         )
-        self.settings_button.grid(row=0, column=1, rowspan=2, sticky="e")
+        self.settings_button.grid(row=0, column=1, sticky="e")
 
     def _build_dropzone(self) -> None:
         self.dropzone = ctk.CTkFrame(
@@ -186,10 +180,10 @@ class LocalOCRApp(ctk.CTk, _DND_BASE):
             self.dropzone,
             text=("Drop files or a folder here"
                   if DND_AVAILABLE else "Choose what to convert"),
-            font=self._font("heading", theme.SIZE_HEADING, "bold"),
+            font=self._font("ui", theme.SIZE_BODY, "bold"),
             text_color=theme.TEXT,
         )
-        self.drop_headline.grid(row=0, column=0, pady=(INNER + 4, 2))
+        self.drop_headline.grid(row=0, column=0, pady=(INNER - 6, 2))
 
         self.drop_hint = ctk.CTkLabel(
             self.dropzone,
@@ -197,10 +191,10 @@ class LocalOCRApp(ctk.CTk, _DND_BASE):
             font=self._font("body", theme.SIZE_SMALL),
             text_color=theme.TEXT_MUTED,
         )
-        self.drop_hint.grid(row=1, column=0, pady=(0, INNER - 4))
+        self.drop_hint.grid(row=1, column=0, pady=(0, INNER - 10))
 
         buttons = ctk.CTkFrame(self.dropzone, fg_color="transparent")
-        buttons.grid(row=2, column=0, pady=(0, INNER - 4))
+        buttons.grid(row=2, column=0, pady=(0, INNER - 10))
         self.select_button = ctk.CTkButton(
             buttons, text="Choose files", width=130, height=34,
             font=self._font("ui", theme.SIZE_BODY),
@@ -251,92 +245,15 @@ class LocalOCRApp(ctk.CTk, _DND_BASE):
                                padx=INNER, pady=(0, INNER))
         self.queue_scroll.grid_remove()   # shown once something is queued
 
-    def _build_settings(self) -> None:
-        card = ctk.CTkFrame(
-            self.root_scroll, fg_color=theme.CARD, border_color=theme.CARD_BORDER,
-            border_width=1, corner_radius=theme.RADIUS_CARD,
-        )
-        card.grid(row=2, column=0, sticky="ew", padx=PAD, pady=(0, GAP))
-        card.grid_columnconfigure(1, weight=1)
-
-        label_font = self._font("ui", theme.SIZE_SMALL)
-        value_font = self._font("ui", theme.SIZE_BODY)
-
-        ctk.CTkLabel(card, text="QUALITY", font=label_font,
-                     text_color=theme.TEXT_MUTED).grid(
-            row=0, column=0, sticky="w", padx=(INNER, 8), pady=(INNER, 0))
-        self.dpi_combobox = ctk.CTkComboBox(
-            card, values=[f"{dpi} DPI" for dpi in config.DPI_OPTIONS],
-            state="readonly", width=120, font=value_font, height=34,
-            command=lambda _v: self._persist(),
-        )
-        self.dpi_combobox.set(f"{self.prefs.get('dpi', config.DEFAULT_DPI)} DPI")
-        self.dpi_combobox.grid(row=1, column=0, sticky="w",
-                               padx=(INNER, 8), pady=(2, INNER))
-
-        ctk.CTkLabel(card, text="SAVE TO", font=label_font,
-                     text_color=theme.TEXT_MUTED).grid(
-            row=0, column=1, sticky="w", padx=(0, INNER), pady=(INNER, 0))
-        destination = ctk.CTkFrame(card, fg_color="transparent")
-        destination.grid(row=1, column=1, sticky="ew",
-                         padx=(0, INNER), pady=(2, INNER))
-        destination.grid_columnconfigure(0, weight=1)
-        self.output_label = ctk.CTkLabel(
-            destination, text="", anchor="w", font=value_font)
-        self.output_label.grid(row=0, column=0, sticky="ew")
-        self.output_choose_button = ctk.CTkButton(
-            destination, text="Change", width=76, height=30,
-            font=self._font("ui", theme.SIZE_SMALL),
-            fg_color="transparent", border_width=1,
-            border_color=theme.FIELD_BORDER, text_color=theme.TEXT,
-            hover_color=theme.ACCENT_DIM, command=self.choose_output_dir)
-        self.output_choose_button.grid(row=0, column=1, padx=(8, 0))
-        self.output_reset_button = ctk.CTkButton(
-            destination, text="Reset", width=62, height=30,
-            font=self._font("ui", theme.SIZE_SMALL),
-            fg_color="transparent", border_width=1,
-            border_color=theme.FIELD_BORDER, text_color=theme.TEXT_MUTED,
-            hover_color=theme.ACCENT_DIM, state="disabled",
-            command=self.reset_output_dir)
-        self.output_reset_button.grid(row=0, column=2, padx=(6, 0))
-        self._update_output_label()
-
-        # Server row: loopback-locked, so it is reference information rather
-        # than a routine setting. Kept reachable, kept quiet.
-        server = ctk.CTkFrame(card, fg_color="transparent")
-        server.grid(row=2, column=0, columnspan=2, sticky="ew",
-                    padx=INNER, pady=(0, INNER))
-        server.grid_columnconfigure(1, weight=1)
-        ctk.CTkLabel(server, text="SERVER", font=label_font,
-                     text_color=theme.TEXT_MUTED).grid(row=0, column=0, sticky="w")
-        self.url_entry = ctk.CTkEntry(
-            server, font=self._font("mono", theme.SIZE_SMALL), height=30)
-        self.url_entry.insert(0, config.DEFAULT_OLLAMA_URL)
-        self.url_entry.grid(row=0, column=1, sticky="ew", padx=(10, 8))
-        self.refresh_button = ctk.CTkButton(
-            server, text="Refresh models", width=120, height=30,
-            font=self._font("ui", theme.SIZE_SMALL),
-            fg_color="transparent", border_width=1,
-            border_color=theme.FIELD_BORDER, text_color=theme.TEXT,
-            hover_color=theme.ACCENT_DIM, command=self.refresh_models)
-        self.refresh_button.grid(row=0, column=2)
-        self.url_hint = ctk.CTkLabel(
-            server,
-            text="This machine only — localhost or 127.0.0.1.",
-            font=self._font("ui", theme.SIZE_SMALL),
-            text_color=theme.TEXT_MUTED, anchor="w")
-        self.url_hint.grid(row=1, column=1, columnspan=2, sticky="w",
-                           padx=(10, 0), pady=(4, 0))
-
     def _build_action(self) -> None:
         self.start_button = ctk.CTkButton(
-            self.root_scroll, text="Start OCR", height=50,
+            self.root_scroll, text="Start OCR", height=44,
             corner_radius=theme.RADIUS_CONTROL,
             font=self._font("heading", theme.SIZE_HEADING, "bold"),
             command=self.start_ocr,
         )
-        self.start_button.grid(row=3, column=0, sticky="ew",
-                               padx=PAD, pady=(0, GAP))
+        self.start_button.grid(row=2, column=0, sticky="ew",
+                               padx=PAD, pady=(0, 8))
 
     def _build_progress(self) -> None:
         self.status_frame = ctk.CTkFrame(self.root_scroll, fg_color="transparent")
@@ -352,13 +269,13 @@ class LocalOCRApp(ctk.CTk, _DND_BASE):
         self.progress.grid(row=1, column=0, sticky="ew")
         self.progress.set(0)
         # Hidden while idle: an empty progress bar is visual noise.
-        self.status_frame.grid(row=4, column=0, sticky="ew",
-                               padx=PAD, pady=(0, GAP))
+        self.status_frame.grid(row=3, column=0, sticky="ew",
+                               padx=PAD, pady=(0, 8))
         self.status_frame.grid_remove()
 
     def _build_panels(self) -> None:
         self.bottom_frame = ctk.CTkFrame(self.root_scroll, fg_color="transparent")
-        self.bottom_frame.grid(row=5, column=0, sticky="nsew",
+        self.bottom_frame.grid(row=4, column=0, sticky="nsew",
                                padx=PAD, pady=(0, PAD))
         self.bottom_frame.grid_columnconfigure(0, weight=0)
         self.bottom_frame.grid_columnconfigure(1, weight=1)
@@ -450,15 +367,19 @@ class LocalOCRApp(ctk.CTk, _DND_BASE):
 
     def _build_settings_window(self) -> None:
         """A separate, persistent window (opened from the ⚙ button in the
-        header) rather than a tab: appearance, model, and GPU are one-off
-        choices you set and forget, not something that needs to compete for
-        space with Log/Result/Review while a job is running.
+        header) rather than a tab or a card on the main screen: appearance,
+        model, quality, save location, server and GPU are all things you set
+        occasionally, not on every document — keeping them out of the main
+        window leaves the Log/preview area the full height of the window
+        while a job is running instead of sharing it with a settings card.
 
         Built once, up front, and hidden immediately — never destroyed —
         because start_ocr(), _persist() and friends read these widgets
-        (model_combobox, appearance_toggle, gpu_mode_segment,
-        gpu_index_entry, gpu_detect_button, gpu_detected_combobox)
-        regardless of whether this window has ever been opened.
+        (model_combobox, appearance_toggle, dpi_combobox, output_label,
+        output_choose_button, output_reset_button, url_entry,
+        refresh_button, gpu_mode_segment, gpu_index_entry,
+        gpu_detect_button, gpu_detected_combobox) regardless of whether this
+        window has ever been opened.
         """
         window = ctk.CTkToplevel(self)
         window.title("Settings")
@@ -506,22 +427,94 @@ class LocalOCRApp(ctk.CTk, _DND_BASE):
         self.model_combobox.set(self.prefs.get("model") or "")
         self.model_combobox.grid(row=3, column=0, sticky="ew", pady=(0, 16))
 
+        # --------------------------------------------------------- quality
+        ctk.CTkLabel(
+            scroll, text="QUALITY", anchor="w",
+            font=self._font("heading", theme.SIZE_HEADING, "bold"),
+            text_color=theme.TEXT,
+        ).grid(row=4, column=0, sticky="w", pady=(4, 6))
+        self.dpi_combobox = ctk.CTkComboBox(
+            scroll, values=[f"{dpi} DPI" for dpi in config.DPI_OPTIONS],
+            state="readonly", width=120, font=value_font, height=34,
+            command=lambda _v: self._persist(),
+        )
+        self.dpi_combobox.set(f"{self.prefs.get('dpi', config.DEFAULT_DPI)} DPI")
+        self.dpi_combobox.grid(row=5, column=0, sticky="w", pady=(0, 16))
+
+        # -------------------------------------------------------- save to
+        ctk.CTkLabel(
+            scroll, text="SAVE TO", anchor="w",
+            font=self._font("heading", theme.SIZE_HEADING, "bold"),
+            text_color=theme.TEXT,
+        ).grid(row=6, column=0, sticky="w", pady=(4, 6))
+        destination = ctk.CTkFrame(scroll, fg_color="transparent")
+        destination.grid(row=7, column=0, sticky="ew", pady=(0, 16))
+        destination.grid_columnconfigure(0, weight=1)
+        self.output_label = ctk.CTkLabel(
+            destination, text="", anchor="w", font=value_font)
+        self.output_label.grid(row=0, column=0, sticky="ew")
+        self.output_choose_button = ctk.CTkButton(
+            destination, text="Change", width=76, height=30,
+            font=self._font("ui", theme.SIZE_SMALL),
+            fg_color="transparent", border_width=1,
+            border_color=theme.FIELD_BORDER, text_color=theme.TEXT,
+            hover_color=theme.ACCENT_DIM, command=self.choose_output_dir)
+        self.output_choose_button.grid(row=0, column=1, padx=(8, 0))
+        self.output_reset_button = ctk.CTkButton(
+            destination, text="Reset", width=62, height=30,
+            font=self._font("ui", theme.SIZE_SMALL),
+            fg_color="transparent", border_width=1,
+            border_color=theme.FIELD_BORDER, text_color=theme.TEXT_MUTED,
+            hover_color=theme.ACCENT_DIM, state="disabled",
+            command=self.reset_output_dir)
+        self.output_reset_button.grid(row=0, column=2, padx=(6, 0))
+        self._update_output_label()
+
+        # --------------------------------------------------------- server
+        # Loopback-locked, so it is reference information rather than a
+        # routine setting. Kept reachable, kept quiet.
+        ctk.CTkLabel(
+            scroll, text="SERVER", anchor="w",
+            font=self._font("heading", theme.SIZE_HEADING, "bold"),
+            text_color=theme.TEXT,
+        ).grid(row=8, column=0, sticky="w", pady=(4, 6))
+        server = ctk.CTkFrame(scroll, fg_color="transparent")
+        server.grid(row=9, column=0, sticky="ew", pady=(0, 0))
+        server.grid_columnconfigure(0, weight=1)
+        self.url_entry = ctk.CTkEntry(
+            server, font=self._font("mono", theme.SIZE_SMALL), height=30)
+        self.url_entry.insert(0, config.DEFAULT_OLLAMA_URL)
+        self.url_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        self.refresh_button = ctk.CTkButton(
+            server, text="Refresh models", width=120, height=30,
+            font=self._font("ui", theme.SIZE_SMALL),
+            fg_color="transparent", border_width=1,
+            border_color=theme.FIELD_BORDER, text_color=theme.TEXT,
+            hover_color=theme.ACCENT_DIM, command=self.refresh_models)
+        self.refresh_button.grid(row=0, column=1)
+        self.url_hint = ctk.CTkLabel(
+            scroll,
+            text="This machine only — localhost or 127.0.0.1.",
+            font=self._font("ui", theme.SIZE_SMALL),
+            text_color=theme.TEXT_MUTED, anchor="w")
+        self.url_hint.grid(row=10, column=0, sticky="w", pady=(4, 16))
+
         # ---------------------------------------------------------- GPU
         ctk.CTkLabel(
             scroll, text="GPU", anchor="w",
             font=self._font("heading", theme.SIZE_HEADING, "bold"),
             text_color=theme.TEXT,
-        ).grid(row=4, column=0, sticky="w", pady=(4, 2))
+        ).grid(row=11, column=0, sticky="w", pady=(4, 2))
         ctk.CTkLabel(
             scroll, anchor="w", justify="left", wraplength=520,
             text=("Which processor Ollama should prefer for OCR. This is a "
                   "hint sent with every request, saved as your default — "
                   "Ollama still decides based on what's actually installed."),
             font=self._font("body", theme.SIZE_SMALL), text_color=theme.TEXT_MUTED,
-        ).grid(row=5, column=0, sticky="w", pady=(0, 8))
+        ).grid(row=12, column=0, sticky="w", pady=(0, 8))
 
         gpu_row = ctk.CTkFrame(scroll, fg_color="transparent")
-        gpu_row.grid(row=6, column=0, sticky="w", pady=(0, 4))
+        gpu_row.grid(row=13, column=0, sticky="w", pady=(0, 4))
         ctk.CTkLabel(gpu_row, text="MODE", font=label_font,
                      text_color=theme.TEXT_MUTED).grid(
             row=0, column=0, sticky="w", padx=(0, 8))
@@ -534,7 +527,7 @@ class LocalOCRApp(ctk.CTk, _DND_BASE):
         self.gpu_mode_segment.grid(row=0, column=1, sticky="w")
 
         index_row = ctk.CTkFrame(scroll, fg_color="transparent")
-        index_row.grid(row=7, column=0, sticky="w", pady=(0, 12))
+        index_row.grid(row=14, column=0, sticky="w", pady=(0, 12))
         ctk.CTkLabel(index_row, text="GPU INDEX", font=label_font,
                      text_color=theme.TEXT_MUTED).grid(
             row=0, column=0, sticky="w", padx=(0, 8))
@@ -582,20 +575,20 @@ class LocalOCRApp(ctk.CTk, _DND_BASE):
             scroll, text="DPI QUALITY GUIDE", anchor="w",
             font=self._font("heading", theme.SIZE_HEADING, "bold"),
             text_color=theme.TEXT,
-        ).grid(row=8, column=0, sticky="w", pady=(12, 2))
+        ).grid(row=15, column=0, sticky="w", pady=(12, 2))
         ctk.CTkLabel(
             scroll, anchor="w", justify="left", wraplength=520,
             text=("DPI controls how sharp each page is rendered before it's "
                   "sent off for recognition. Higher DPI reads finer detail "
                   "but takes longer and uses more memory per page."),
             font=self._font("body", theme.SIZE_SMALL), text_color=theme.TEXT_MUTED,
-        ).grid(row=9, column=0, sticky="w", pady=(0, 8))
+        ).grid(row=16, column=0, sticky="w", pady=(0, 8))
 
         for offset, (dpi, label, description) in enumerate(config.DPI_GUIDE):
             card = ctk.CTkFrame(
                 scroll, fg_color=theme.CARD, border_color=theme.CARD_BORDER,
                 border_width=1, corner_radius=theme.RADIUS_CONTROL)
-            card.grid(row=10 + offset, column=0, sticky="ew", pady=4)
+            card.grid(row=17 + offset, column=0, sticky="ew", pady=4)
             card.grid_columnconfigure(1, weight=1)
             ctk.CTkLabel(
                 card, text=str(dpi), width=56,

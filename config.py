@@ -13,6 +13,41 @@ EXAMPLE_MODELS = ["gemma4:12b", "qwen3.6:27b"]
 DPI_OPTIONS = [100, 150, 200, 300]
 DEFAULT_DPI = 150
 
+# Plain-language guidance shown in the Settings tab so "150 DPI" means
+# something to someone who has never had a reason to think about scan
+# resolution. (label, one-line description of when to reach for it).
+DPI_GUIDE = [
+    (100, "Fastest",
+     "Large, clean, typed text where speed matters more than fine detail — "
+     "quick previews or a first pass over a big batch."),
+    (150, "Balanced — the default",
+     "Most everyday scans: contracts, letters, reports, typed pages in "
+     "normal print size."),
+    (200, "Sharper",
+     "Smaller print, denser tables, or a scan that isn't perfectly clean."),
+    (300, "Highest fidelity",
+     "Tiny text, faint or low-contrast originals, or handwriting — anything "
+     "where getting it right matters more than getting it fast. Slower, "
+     "and uses more memory per page."),
+]
+
+# GPU handling. Values are what the app stores/sends; labels are what the
+# Settings tab shows. Ollama accepts these as ordinary per-request options
+# (see ocr_service.build_ollama_options) — no server restart needed to
+# change them.
+GPU_MODE_AUTO = "auto"
+GPU_MODE_GPU = "gpu"
+GPU_MODE_CPU = "cpu"
+GPU_MODE_OPTIONS = [GPU_MODE_AUTO, GPU_MODE_GPU, GPU_MODE_CPU]
+GPU_MODE_LABELS = {
+    GPU_MODE_AUTO: "Auto",
+    GPU_MODE_GPU: "GPU",
+    GPU_MODE_CPU: "CPU only",
+}
+# Sane bound for a manually-entered GPU index — nothing plausible exceeds
+# this, so anything past it is a typo rather than a real card.
+MAX_GPU_INDEX = 15
+
 PDF_EXTENSIONS = frozenset({".pdf"})
 IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".webp"})
 SUPPORTED_EXTENSIONS = PDF_EXTENSIONS | IMAGE_EXTENSIONS

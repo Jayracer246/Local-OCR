@@ -25,6 +25,8 @@ DEFAULTS: dict = {
     "appearance": "light",
     "window": None,          # "WxH" geometry, e.g. "960x720"
     "recursive": False,      # recurse into subfolders when a folder is dropped
+    "gpu_mode": config.GPU_MODE_AUTO,   # "auto" | "gpu" | "cpu"
+    "gpu_index": None,       # optional int; only consulted when gpu_mode == "gpu"
 }
 
 
@@ -87,6 +89,17 @@ def _sanitize(raw: dict) -> dict:
 
     if isinstance(raw.get("recursive"), bool):
         clean["recursive"] = raw["recursive"]
+
+    gpu_mode = raw.get("gpu_mode")
+    if gpu_mode in config.GPU_MODE_OPTIONS:
+        clean["gpu_mode"] = gpu_mode
+
+    gpu_index = raw.get("gpu_index")
+    # bool is an int subclass — exclude it explicitly so a stray `true`
+    # in the file doesn't silently become GPU index 1.
+    if (isinstance(gpu_index, int) and not isinstance(gpu_index, bool)
+            and 0 <= gpu_index <= config.MAX_GPU_INDEX):
+        clean["gpu_index"] = gpu_index
 
     return clean
 

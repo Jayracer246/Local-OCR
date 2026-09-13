@@ -64,6 +64,8 @@ class OCRRequest:
     ollama_url: str
     model: str
     dpi: int
+    gpu_mode: str = config.GPU_MODE_AUTO
+    gpu_index: int | None = None
 
 
 def is_loopback_host(hostname: str | None) -> bool:
@@ -300,6 +302,32 @@ def validate_output_dir(path: Path) -> None:
         raise ValueError(f"Not a folder: {path}")
     if not os.access(path, os.W_OK | os.X_OK):
         raise ValueError(f"Folder is not writable: {path}")
+
+
+def build_ollama_options(gpu_mode: str, gpu_index: int | None = None) -> dict:
+    """Translate the app's GPU setting into Ollama's per-request options.
+
+    Ollama's ``/api/chat`` (and ``/api/generate``) accept an ``options``
+    object at request time — no server restart or Modelfile edit needed:
+
+    * ``"auto"`` sends nothing, leaving Ollama's own placement decision
+      alone. This is the safe default and matches pre-existing behaviour.
+    * ``"cpu"`` sends ``num_gpu=0``, which forces every layer onto system
+      memory instead of VRAM.
+    * ``"gpu"`` sends ``num_gpu=-1`` (as many layers as fit in VRAM), and,
+      if a card index was given, ``main_gpu`` as a hint for which one to
+      prefer on a multi-GPU machine. ``main_gpu`` is best-effort: Ollama's
+      scheduler has not always honoured it for placement on every version,
+      so treat it as a preference rather than a guarantee.
+    """
+    if gpu_mode == config.GPU_MODE_CPU:
+        return {"num_gpu": 0}
+    if gpu_mode == config.GPU_MODE_GPU:
+        options: dict = {"num_gpu": -1}
+        if gpu_index is not None:
+            options["main_gpu"] = gpu_index
+        return options
+    return {}
 
 
 def make_client(url: str, timeout: int) -> "ollama.Client":
@@ -577,8 +605,14 @@ def recognize_images(
     progress_callback: ProgressCallback | None = None,
     event_callback: EventCallback | None = None,
     cancel_event=None,
+    options: dict | None = None,
 ) -> list[str]:
     """Send one independent chat request per page; return texts in order.
+
+    ``options`` is passed straight through to every ``client.chat`` call —
+    see ``build_ollama_options`` for how the app's GPU setting becomes this
+    dict. ``None``/empty means "don't override anything Ollama would do by
+    default".
 
     ``pages`` is consumed lazily, so for a PDF each page is rendered only
     when this function reaches it and is released immediately afterwards.
@@ -627,6 +661,7 @@ def recognize_images(
                     },
                 ],
                 stream=True,
+                options=options or None,
             )
             for chunk in stream:
                 _raise_if_cancelled(cancel_event)
@@ -833,6 +868,7 @@ def process_ocr(request: OCRRequest, event_queue, cancel_event=None) -> Path:
             progress,
             emit_event,
             cancel_event,
+            build_ollama_options(request.gpu_mode, request.gpu_index),
         )
 
     _raise_if_cancelled(cancel_event)

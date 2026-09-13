@@ -63,7 +63,7 @@ PREVIEW_WIDTH = 210
 REVIEW_IMAGE_WIDTH = 380
 REVIEW_IMAGE_MAX_H = 520
 REVIEW_IMAGE_CACHE_SIZE = 5
-MAX_LISTED_FILES = 6      # before the selection summary collapses to a count
+QUEUE_LIST_HEIGHT = 132   # px — the scrollable queue list before it scrolls
 
 
 class LocalOCRApp(ctk.CTk, _DND_BASE):
@@ -78,7 +78,11 @@ class LocalOCRApp(ctk.CTk, _DND_BASE):
 
         self.operation_state = OperationState.IDLE
         self.closing = False
-        self.selected_paths: list[Path] = []
+        # A real queue: keyed by resolved path so the same file dropped
+        # twice doesn't duplicate, ordered by when it was added so the list
+        # reads the way a queue should.
+        self._queue: "OrderedDict[Path, Path]" = OrderedDict()
+        self._queue_rows: dict[Path, ctk.CTkFrame] = {}
         self.event_queue: queue.Queue = queue.Queue()
         self.cancel_event = threading.Event()
         self._render_phase_seen = False
@@ -102,6 +106,11 @@ class LocalOCRApp(ctk.CTk, _DND_BASE):
         self._enable_drag_and_drop()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.after(config.UI_POLL_INTERVAL_MS, self.drain_ui_events)
+
+    @property
+    def selected_paths(self) -> list[Path]:
+        """The current queue, in the order documents were added to it."""
+        return list(self._queue.values())
 
     # ------------------------------------------------------------- layout
 
@@ -168,7 +177,7 @@ class LocalOCRApp(ctk.CTk, _DND_BASE):
 
         self.drop_hint = ctk.CTkLabel(
             self.dropzone,
-            text="PDF, PNG, JPEG or WebP",
+            text="PDF, PNG, JPEG or WebP — drop more anytime to add to the queue",
             font=self._font("body", theme.SIZE_SMALL),
             text_color=theme.TEXT_MUTED,
         )
@@ -192,13 +201,39 @@ class LocalOCRApp(ctk.CTk, _DND_BASE):
         )
         self.select_folder_button.grid(row=0, column=1)
 
-        self.file_label = ctk.CTkLabel(
+        # ---- queue: header (count + clear) then the list itself ----
+        queue_header = ctk.CTkFrame(self.dropzone, fg_color="transparent")
+        queue_header.grid(row=3, column=0, sticky="ew", padx=INNER, pady=(0, 4))
+        queue_header.grid_columnconfigure(0, weight=1)
+        self.queue_count_label = ctk.CTkLabel(
+            queue_header, text="", anchor="w",
+            font=self._font("ui", theme.SIZE_SMALL), text_color=theme.TEXT_MUTED)
+        self.queue_count_label.grid(row=0, column=0, sticky="w")
+        self.queue_clear_button = ctk.CTkButton(
+            queue_header, text="Clear all", width=72, height=24,
+            font=self._font("ui", theme.SIZE_SMALL),
+            fg_color="transparent", border_width=1,
+            border_color=theme.FIELD_BORDER, text_color=theme.TEXT_MUTED,
+            hover_color=theme.ACCENT_DIM, command=self.clear_queue,
+        )
+        self.queue_clear_button.grid(row=0, column=1, sticky="e")
+        self.queue_clear_button.grid_remove()
+
+        self.queue_empty_label = ctk.CTkLabel(
             self.dropzone, text="Nothing selected yet", anchor="center",
             font=self._font("ui", theme.SIZE_SMALL),
             text_color=theme.TEXT_MUTED, justify="center",
         )
-        self.file_label.grid(row=3, column=0, sticky="ew",
-                             padx=INNER, pady=(0, INNER))
+        self.queue_empty_label.grid(row=4, column=0, sticky="ew",
+                                    padx=INNER, pady=(0, INNER))
+
+        self.queue_scroll = ctk.CTkScrollableFrame(
+            self.dropzone, fg_color="transparent", height=QUEUE_LIST_HEIGHT,
+            corner_radius=0)
+        self.queue_scroll.grid_columnconfigure(0, weight=1)
+        self.queue_scroll.grid(row=4, column=0, sticky="ew",
+                               padx=INNER, pady=(0, INNER))
+        self.queue_scroll.grid_remove()   # shown once something is queued
 
     def _build_settings(self) -> None:
         card = ctk.CTkFrame(
@@ -352,6 +387,7 @@ class LocalOCRApp(ctk.CTk, _DND_BASE):
         self.tabview.add("Log")
         self.tabview.add("Result")
         self.tabview.add("Review")
+        self.tabview.add("Settings")
         self.tabview.set("Log")
         self.tabview.grid(row=0, column=1, sticky="nsew")
 
@@ -409,23 +445,161 @@ class LocalOCRApp(ctk.CTk, _DND_BASE):
             border_width=0, fg_color="transparent")
         self.review_text.grid(row=1, column=1, sticky="nsew", pady=4)
 
+        self._build_settings_tab(self.tabview.tab("Settings"))
+
+    def _build_settings_tab(self, parent) -> None:
+        """App-level preferences that don't belong in the per-run row above:
+        which processor Ollama should prefer, and what the DPI choice means."""
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_rowconfigure(0, weight=1)
+        label_font = self._font("ui", theme.SIZE_SMALL)
+        value_font = self._font("ui", theme.SIZE_BODY)
+
+        scroll = ctk.CTkScrollableFrame(parent, fg_color="transparent")
+        scroll.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+        scroll.grid_columnconfigure(0, weight=1)
+
+        # ---------------------------------------------------------- GPU
+        ctk.CTkLabel(
+            scroll, text="GPU", anchor="w",
+            font=self._font("heading", theme.SIZE_HEADING, "bold"),
+            text_color=theme.TEXT,
+        ).grid(row=0, column=0, sticky="w", pady=(4, 2))
+        ctk.CTkLabel(
+            scroll, anchor="w", justify="left", wraplength=520,
+            text=("Which processor Ollama should prefer for OCR. This is a "
+                  "hint sent with every request, saved as your default — "
+                  "Ollama still decides based on what's actually installed."),
+            font=self._font("body", theme.SIZE_SMALL), text_color=theme.TEXT_MUTED,
+        ).grid(row=1, column=0, sticky="w", pady=(0, 8))
+
+        gpu_row = ctk.CTkFrame(scroll, fg_color="transparent")
+        gpu_row.grid(row=2, column=0, sticky="w", pady=(0, 4))
+        ctk.CTkLabel(gpu_row, text="MODE", font=label_font,
+                     text_color=theme.TEXT_MUTED).grid(
+            row=0, column=0, sticky="w", padx=(0, 8))
+        self.gpu_mode_segment = ctk.CTkSegmentedButton(
+            gpu_row, values=list(config.GPU_MODE_LABELS.values()),
+            font=value_font, command=lambda _v: self._on_gpu_mode_change(),
+        )
+        self.gpu_mode_segment.set(
+            config.GPU_MODE_LABELS.get(self.prefs.get("gpu_mode"), "Auto"))
+        self.gpu_mode_segment.grid(row=0, column=1, sticky="w")
+
+        index_row = ctk.CTkFrame(scroll, fg_color="transparent")
+        index_row.grid(row=3, column=0, sticky="w", pady=(0, 12))
+        ctk.CTkLabel(index_row, text="GPU INDEX", font=label_font,
+                     text_color=theme.TEXT_MUTED).grid(
+            row=0, column=0, sticky="w", padx=(0, 8))
+        self.gpu_index_entry = ctk.CTkEntry(
+            index_row, width=70, height=30, font=value_font,
+            placeholder_text="0")
+        stored_index = self.prefs.get("gpu_index")
+        if stored_index is not None:
+            self.gpu_index_entry.insert(0, str(stored_index))
+        self.gpu_index_entry.bind("<FocusOut>", lambda _e: self._persist())
+        self.gpu_index_entry.grid(row=0, column=1, sticky="w")
+        ctk.CTkLabel(
+            index_row,
+            text=("Optional — only used in GPU mode, on a machine with more "
+                  "than one card. Best-effort: Ollama does not guarantee it."),
+            font=self._font("ui", theme.SIZE_SMALL), text_color=theme.TEXT_MUTED,
+            anchor="w", justify="left", wraplength=440,
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        self._on_gpu_mode_change(persist=False)
+
+        # ------------------------------------------------------ DPI guide
+        ctk.CTkLabel(
+            scroll, text="DPI QUALITY GUIDE", anchor="w",
+            font=self._font("heading", theme.SIZE_HEADING, "bold"),
+            text_color=theme.TEXT,
+        ).grid(row=4, column=0, sticky="w", pady=(12, 2))
+        ctk.CTkLabel(
+            scroll, anchor="w", justify="left", wraplength=520,
+            text=("DPI controls how sharp each page is rendered before it's "
+                  "sent off for recognition. Higher DPI reads finer detail "
+                  "but takes longer and uses more memory per page."),
+            font=self._font("body", theme.SIZE_SMALL), text_color=theme.TEXT_MUTED,
+        ).grid(row=5, column=0, sticky="w", pady=(0, 8))
+
+        for offset, (dpi, label, description) in enumerate(config.DPI_GUIDE):
+            card = ctk.CTkFrame(
+                scroll, fg_color=theme.CARD, border_color=theme.CARD_BORDER,
+                border_width=1, corner_radius=theme.RADIUS_CONTROL)
+            card.grid(row=6 + offset, column=0, sticky="ew", pady=4)
+            card.grid_columnconfigure(1, weight=1)
+            ctk.CTkLabel(
+                card, text=str(dpi), width=56,
+                font=self._font("heading", theme.SIZE_HEADING, "bold"),
+                text_color=theme.ACCENT,
+            ).grid(row=0, column=0, rowspan=2, sticky="w",
+                   padx=(INNER, 4), pady=(INNER - 4, INNER - 4))
+            ctk.CTkLabel(
+                card, text=label, anchor="w",
+                font=self._font("ui", theme.SIZE_BODY, "bold"),
+                text_color=theme.TEXT,
+            ).grid(row=0, column=1, sticky="ew", padx=(0, INNER), pady=(INNER - 4, 0))
+            ctk.CTkLabel(
+                card, text=description, anchor="w", justify="left",
+                wraplength=420,
+                font=self._font("body", theme.SIZE_SMALL),
+                text_color=theme.TEXT_MUTED,
+            ).grid(row=1, column=1, sticky="ew", padx=(0, INNER), pady=(0, INNER - 4))
+
+    # ----------------------------------------------------------------- GPU
+
+    def _on_gpu_mode_change(self, persist: bool = True) -> None:
+        is_gpu = self.gpu_mode_segment.get() == config.GPU_MODE_LABELS[config.GPU_MODE_GPU]
+        self.gpu_index_entry.configure(state="normal" if is_gpu else "disabled")
+        if persist:
+            self._persist()
+
+    def _gpu_mode(self) -> str:
+        label = self.gpu_mode_segment.get()
+        for value, text in config.GPU_MODE_LABELS.items():
+            if text == label:
+                return value
+        return config.GPU_MODE_AUTO
+
+    def _gpu_index(self) -> "int | None":
+        text = self.gpu_index_entry.get().strip()
+        if not text:
+            return None
+        try:
+            value = int(text)
+        except ValueError:
+            return None
+        return value if 0 <= value <= config.MAX_GPU_INDEX else None
+
     # -------------------------------------------------------- drag & drop
 
     def _enable_drag_and_drop(self) -> None:
+        self.dnd_active = False
         if not DND_AVAILABLE:
             return
         try:
             self.TkdndVersion = TkinterDnD._require(self)
-            for widget in (self.dropzone, self.drop_headline,
-                           self.drop_hint, self.file_label):
+            for widget in (self.dropzone, self.drop_headline, self.drop_hint,
+                           self.queue_empty_label, self.queue_scroll):
                 widget.drop_target_register(DND_FILES)
                 widget.dnd_bind("<<Drop>>", self._on_drop)
                 widget.dnd_bind("<<DragEnter>>", self._on_drag_enter)
                 widget.dnd_bind("<<DragLeave>>", self._on_drag_leave)
-        except Exception:
-            # Extension present but unusable on this display; carry on
-            # without the drop target rather than failing to start.
-            pass
+            self.dnd_active = True
+        except Exception as exc:
+            # The module imported fine (DND_AVAILABLE is about the Python
+            # import succeeding), but the Tcl extension it needs did not
+            # load into this Tk interpreter — different failure, same
+            # underlying "no drop target" outcome. This used to be silently
+            # swallowed, which left the headline inviting a drag that could
+            # never do anything and gave no clue why. Now it's visible: the
+            # invitation is withdrawn and the reason is logged, since a
+            # blank Log tab was exactly what made this bug unreportable.
+            self.drop_headline.configure(text="Choose what to convert")
+            self.append_log(
+                "[Info] Drag and drop could not be enabled on this system "
+                f"({exc}). Use \"Choose files\" or \"Choose folder\" instead."
+            )
 
     def _on_drag_enter(self, _event):
         if self.operation_state is OperationState.IDLE:
@@ -451,7 +625,10 @@ class LocalOCRApp(ctk.CTk, _DND_BASE):
     # ----------------------------------------------------- file selection
 
     def _accept_paths(self, paths: list[Path]) -> None:
-        """Validate and adopt a set of dropped or chosen paths."""
+        """Validate a set of dropped or chosen paths and add them to the
+        queue. Already-queued files are skipped rather than duplicated."""
+        if self.operation_state is not OperationState.IDLE:
+            return
         documents = ocr_service.collect_inputs(
             paths, recursive=bool(self.prefs.get("recursive")))
         if not documents:
@@ -464,7 +641,11 @@ class LocalOCRApp(ctk.CTk, _DND_BASE):
 
         accepted: list[Path] = []
         rejected: list[str] = []
+        duplicates = 0
         for document in documents:
+            if document.resolve() in self._queue:
+                duplicates += 1
+                continue
             try:
                 ocr_service.validate_input_path(document)
             except ValueError as exc:
@@ -473,33 +654,81 @@ class LocalOCRApp(ctk.CTk, _DND_BASE):
                 accepted.append(document)
 
         if not accepted:
-            messagebox.showwarning(
-                "Unsupported files", "\n\n".join(rejected[:5]), parent=self)
+            if rejected:
+                messagebox.showwarning(
+                    "Unsupported files", "\n\n".join(rejected[:5]), parent=self)
+            elif duplicates:
+                self.append_log(
+                    f"[Info] {duplicates} file(s) were already in the queue.")
             return
 
-        self.selected_paths = accepted
-        self._update_file_label()
+        for document in accepted:
+            self._add_to_queue(document)
+        self._refresh_queue_view()
+
         if rejected:
             self.append_log(
                 f"[Skipped] {len(rejected)} file(s) were not usable:")
             for line in rejected[:10]:
                 self.append_log(f"          {line}")
+        if duplicates:
+            self.append_log(
+                f"[Info] {duplicates} file(s) were already in the queue.")
 
-    def _update_file_label(self) -> None:
-        count = len(self.selected_paths)
+    # ------------------------------------------------------------- queue
+
+    def _add_to_queue(self, path: Path) -> None:
+        key = path.resolve()
+        self._queue[key] = path
+        row = ctk.CTkFrame(self.queue_scroll, fg_color="transparent")
+        row.grid_columnconfigure(0, weight=1)
+        row.grid(row=len(self._queue_rows), column=0, sticky="ew", pady=2)
+        ctk.CTkLabel(
+            row, text=path.name, anchor="w",
+            font=self._font("ui", theme.SIZE_SMALL), text_color=theme.TEXT,
+        ).grid(row=0, column=0, sticky="ew", padx=(2, 8))
+        ctk.CTkButton(
+            row, text="✕", width=24, height=24,
+            font=self._font("ui", theme.SIZE_SMALL),
+            fg_color="transparent", border_width=0,
+            text_color=theme.TEXT_MUTED, hover_color=theme.ACCENT_DIM,
+            command=lambda k=key: self.remove_from_queue(k),
+        ).grid(row=0, column=1, sticky="e")
+        self._queue_rows[key] = row
+
+    def remove_from_queue(self, key: Path) -> None:
+        if self.operation_state is not OperationState.IDLE:
+            return
+        self._queue.pop(key, None)
+        row = self._queue_rows.pop(key, None)
+        if row is not None:
+            row.destroy()
+        for index, remaining_row in enumerate(self._queue_rows.values()):
+            remaining_row.grid_configure(row=index)
+        self._refresh_queue_view()
+
+    def clear_queue(self) -> None:
+        if self.operation_state is not OperationState.IDLE:
+            return
+        self._queue.clear()
+        for row in self._queue_rows.values():
+            row.destroy()
+        self._queue_rows.clear()
+        self._refresh_queue_view()
+
+    def _refresh_queue_view(self) -> None:
+        count = len(self._queue)
         if count == 0:
-            self.file_label.configure(text="Nothing selected yet",
-                                      text_color=theme.TEXT_MUTED)
-        elif count == 1:
-            self.file_label.configure(text=self.selected_paths[0].name,
-                                      text_color=theme.TEXT)
-        elif count <= MAX_LISTED_FILES:
-            names = ", ".join(p.name for p in self.selected_paths)
-            self.file_label.configure(text=f"{count} documents — {names}",
-                                      text_color=theme.TEXT)
+            self.queue_count_label.configure(text="")
+            self.queue_clear_button.grid_remove()
+            self.queue_scroll.grid_remove()
+            self.queue_empty_label.grid()
         else:
-            self.file_label.configure(
-                text=f"{count} documents selected", text_color=theme.TEXT)
+            noun = "document" if count == 1 else "documents"
+            self.queue_count_label.configure(text=f"{count} {noun} queued")
+            self.queue_clear_button.grid()
+            self.queue_empty_label.grid_remove()
+            self.queue_scroll.grid()
 
     def select_file(self) -> None:
         if self.operation_state is not OperationState.IDLE:
@@ -529,6 +758,8 @@ class LocalOCRApp(ctk.CTk, _DND_BASE):
             "appearance": "dark" if ctk.get_appearance_mode() == "Dark" else "light",
             "window": f"{self.winfo_width()}x{self.winfo_height()}",
             "recursive": bool(self.prefs.get("recursive")),
+            "gpu_mode": self._gpu_mode(),
+            "gpu_index": self._gpu_index(),
         })
 
     def _on_appearance_change(self, value: str) -> None:
@@ -679,6 +910,12 @@ class LocalOCRApp(ctk.CTk, _DND_BASE):
         elif completed:
             self.tabview.set("Result")
             self._show_completion_dialog(completed)
+        if not failures:
+            # Everything queued is done; leave the queue ready for the next
+            # batch rather than making the user clear it themselves. A
+            # partial failure leaves the queue untouched so nothing that
+            # didn't finish disappears silently.
+            self.clear_queue()
 
     # --------------------------------------------------------- page events
 
@@ -855,9 +1092,11 @@ class LocalOCRApp(ctk.CTk, _DND_BASE):
     def _apply_ocr_busy_state(self) -> None:
         for widget in (self.select_button, self.select_folder_button,
                        self.url_entry, self.refresh_button, self.model_combobox,
-                       self.output_choose_button, self.output_reset_button):
+                       self.output_choose_button, self.output_reset_button,
+                       self.gpu_mode_segment):
             widget.configure(state="disabled")
         self.dpi_combobox.configure(state="disabled")
+        self.gpu_index_entry.configure(state="disabled")
         self.start_button.configure(
             state="normal", text="Cancel", command=self.cancel_ocr)
         self._render_phase_seen = False
@@ -873,9 +1112,10 @@ class LocalOCRApp(ctk.CTk, _DND_BASE):
     def _restore_idle(self) -> None:
         for widget in (self.select_button, self.select_folder_button,
                        self.url_entry, self.refresh_button, self.model_combobox,
-                       self.output_choose_button):
+                       self.output_choose_button, self.gpu_mode_segment):
             widget.configure(state="normal")
         self.dpi_combobox.configure(state="readonly")
+        self._on_gpu_mode_change(persist=False)  # re-sync gpu_index_entry state
         self.start_button.configure(
             state="normal", text="Start OCR", command=self.start_ocr)
         self.progress.stop()
@@ -974,11 +1214,15 @@ class LocalOCRApp(ctk.CTk, _DND_BASE):
                 messagebox.showerror("Cannot use that folder", str(exc), parent=self)
                 return
 
+        gpu_mode = self._gpu_mode()
+        gpu_index = self._gpu_index() if gpu_mode == config.GPU_MODE_GPU else None
+
         requests = [
             OCRRequest(
                 input_path=path,
                 output_path=ocr_service.build_output_path(path, self.output_dir),
                 ollama_url=url, model=model, dpi=dpi,
+                gpu_mode=gpu_mode, gpu_index=gpu_index,
             )
             for path in self.selected_paths
         ]

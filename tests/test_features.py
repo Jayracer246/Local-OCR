@@ -36,6 +36,7 @@ class TestSettingsRoundTrip(unittest.TestCase):
         values = {
             "model": "glm-ocr:latest", "dpi": 300, "output_dir": str(out),
             "appearance": "dark", "window": "1024x768", "recursive": True,
+            "gpu_mode": "gpu", "gpu_index": 1,
         }
         self.assertTrue(user_settings.save(values, self.path))
         self.assertEqual(user_settings.load(self.path), values)
@@ -59,6 +60,8 @@ class TestSettingsRoundTrip(unittest.TestCase):
             "output_dir": "/nonexistent/nope",   # gone since it was saved
             "model": "x" * 5000,                 # absurd length
             "recursive": "yes please",           # wrong type
+            "gpu_mode": "quantum",               # not a real mode
+            "gpu_index": 99999,                  # not a plausible card
         }))
         loaded = user_settings.load(self.path)
         self.assertEqual(loaded["dpi"], config.DEFAULT_DPI)
@@ -67,6 +70,27 @@ class TestSettingsRoundTrip(unittest.TestCase):
         self.assertIsNone(loaded["output_dir"])
         self.assertEqual(loaded["model"], "")
         self.assertIs(loaded["recursive"], False)
+        self.assertEqual(loaded["gpu_mode"], config.GPU_MODE_AUTO)
+        self.assertIsNone(loaded["gpu_index"])
+
+    def test_gpu_settings_round_trip_and_reject_bad_values(self):
+        for mode in config.GPU_MODE_OPTIONS:
+            with self.subTest(mode=mode):
+                user_settings.save({"gpu_mode": mode, "gpu_index": 2}, self.path)
+                loaded = user_settings.load(self.path)
+                self.assertEqual(loaded["gpu_mode"], mode)
+                self.assertEqual(loaded["gpu_index"], 2)
+
+        # A bool is technically an int in Python, but "true" is never a
+        # sensible GPU index — it must not silently become index 1.
+        self.path.write_text(json.dumps({"gpu_mode": "gpu", "gpu_index": True}))
+        self.assertIsNone(user_settings.load(self.path)["gpu_index"])
+
+        # Out of range and wrong type both fall back to None.
+        for bad in (-1, config.MAX_GPU_INDEX + 1, "0", 3.5, None):
+            with self.subTest(bad=bad):
+                self.path.write_text(json.dumps({"gpu_mode": "gpu", "gpu_index": bad}))
+                self.assertIsNone(user_settings.load(self.path)["gpu_index"])
 
     def test_no_server_url_is_ever_persisted(self):
         """Editing this file must not be able to redirect the app off-box."""

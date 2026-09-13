@@ -120,7 +120,20 @@ class LocalOCRApp(ctk.CTk, _DND_BASE):
     def _build_layout(self) -> None:
         self.configure(fg_color=theme.SURFACE)
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(5, weight=1)      # the tab area absorbs resize
+        self.grid_rowconfigure(0, weight=1)
+
+        # Everything lives inside one scrollable region instead of gridding
+        # straight onto the window. Several rows below (the dropzone's
+        # queue list especially) have grown taller than a fixed layout can
+        # always guarantee space for; without this, shrinking the window —
+        # or just having a shorter screen — pushed the Start button and the
+        # tabs clean off the bottom with no way to reach them. A window
+        # that's too short now gets a scrollbar instead of losing controls.
+        self.root_scroll = ctk.CTkScrollableFrame(
+            self, fg_color=theme.SURFACE, corner_radius=0)
+        self.root_scroll.grid(row=0, column=0, sticky="nsew")
+        self.root_scroll.grid_columnconfigure(0, weight=1)
+        self.root_scroll.grid_rowconfigure(5, weight=1)  # tab area absorbs resize
 
         self._build_header()
         self._build_dropzone()
@@ -128,9 +141,10 @@ class LocalOCRApp(ctk.CTk, _DND_BASE):
         self._build_action()
         self._build_progress()
         self._build_panels()
+        self._build_settings_window()
 
     def _build_header(self) -> None:
-        header = ctk.CTkFrame(self, fg_color="transparent")
+        header = ctk.CTkFrame(self.root_scroll, fg_color="transparent")
         header.grid(row=0, column=0, sticky="ew", padx=PAD, pady=(PAD, GAP))
         header.grid_columnconfigure(0, weight=1)
 
@@ -148,19 +162,19 @@ class LocalOCRApp(ctk.CTk, _DND_BASE):
             text_color=theme.TEXT_MUTED,
         ).grid(row=1, column=0, sticky="w", pady=(2, 0))
 
-        self.appearance_toggle = ctk.CTkSegmentedButton(
-            header, values=["Light", "Dark"], width=140,
+        self.settings_button = ctk.CTkButton(
+            header, text="⚙ Settings", width=110, height=34,
             font=self._font("ui", theme.SIZE_SMALL),
-            command=self._on_appearance_change,
+            fg_color="transparent", border_width=1,
+            border_color=theme.FIELD_BORDER, text_color=theme.TEXT,
+            hover_color=theme.ACCENT_DIM,
+            command=self.open_settings,
         )
-        self.appearance_toggle.set(
-            "Dark" if self.prefs.get("appearance") == "dark" else "Light"
-        )
-        self.appearance_toggle.grid(row=0, column=1, rowspan=2, sticky="e")
+        self.settings_button.grid(row=0, column=1, rowspan=2, sticky="e")
 
     def _build_dropzone(self) -> None:
         self.dropzone = ctk.CTkFrame(
-            self, fg_color=theme.CARD, border_color=theme.CARD_BORDER,
+            self.root_scroll, fg_color=theme.CARD, border_color=theme.CARD_BORDER,
             border_width=1, corner_radius=theme.RADIUS_CARD,
         )
         self.dropzone.grid(row=1, column=0, sticky="ew", padx=PAD, pady=(0, GAP))
@@ -237,44 +251,32 @@ class LocalOCRApp(ctk.CTk, _DND_BASE):
 
     def _build_settings(self) -> None:
         card = ctk.CTkFrame(
-            self, fg_color=theme.CARD, border_color=theme.CARD_BORDER,
+            self.root_scroll, fg_color=theme.CARD, border_color=theme.CARD_BORDER,
             border_width=1, corner_radius=theme.RADIUS_CARD,
         )
         card.grid(row=2, column=0, sticky="ew", padx=PAD, pady=(0, GAP))
-        for column in (1, 3):
-            card.grid_columnconfigure(column, weight=1)
+        card.grid_columnconfigure(1, weight=1)
 
         label_font = self._font("ui", theme.SIZE_SMALL)
         value_font = self._font("ui", theme.SIZE_BODY)
 
-        ctk.CTkLabel(card, text="MODEL", font=label_font,
-                     text_color=theme.TEXT_MUTED).grid(
-            row=0, column=0, sticky="w", padx=(INNER, 8), pady=(INNER, 0))
-        self.model_combobox = ctk.CTkComboBox(
-            card, values=list(config.EXAMPLE_MODELS), font=value_font,
-            height=34, command=lambda _v: self._persist(),
-        )
-        self.model_combobox.set(self.prefs.get("model") or "")
-        self.model_combobox.grid(row=1, column=0, columnspan=2, sticky="ew",
-                                 padx=(INNER, 8), pady=(2, INNER))
-
         ctk.CTkLabel(card, text="QUALITY", font=label_font,
                      text_color=theme.TEXT_MUTED).grid(
-            row=0, column=2, sticky="w", padx=(0, 8), pady=(INNER, 0))
+            row=0, column=0, sticky="w", padx=(INNER, 8), pady=(INNER, 0))
         self.dpi_combobox = ctk.CTkComboBox(
             card, values=[f"{dpi} DPI" for dpi in config.DPI_OPTIONS],
             state="readonly", width=120, font=value_font, height=34,
             command=lambda _v: self._persist(),
         )
         self.dpi_combobox.set(f"{self.prefs.get('dpi', config.DEFAULT_DPI)} DPI")
-        self.dpi_combobox.grid(row=1, column=2, sticky="w",
-                               padx=(0, 8), pady=(2, INNER))
+        self.dpi_combobox.grid(row=1, column=0, sticky="w",
+                               padx=(INNER, 8), pady=(2, INNER))
 
         ctk.CTkLabel(card, text="SAVE TO", font=label_font,
                      text_color=theme.TEXT_MUTED).grid(
-            row=0, column=3, sticky="w", padx=(0, INNER), pady=(INNER, 0))
+            row=0, column=1, sticky="w", padx=(0, INNER), pady=(INNER, 0))
         destination = ctk.CTkFrame(card, fg_color="transparent")
-        destination.grid(row=1, column=3, sticky="ew",
+        destination.grid(row=1, column=1, sticky="ew",
                          padx=(0, INNER), pady=(2, INNER))
         destination.grid_columnconfigure(0, weight=1)
         self.output_label = ctk.CTkLabel(
@@ -300,7 +302,7 @@ class LocalOCRApp(ctk.CTk, _DND_BASE):
         # Server row: loopback-locked, so it is reference information rather
         # than a routine setting. Kept reachable, kept quiet.
         server = ctk.CTkFrame(card, fg_color="transparent")
-        server.grid(row=2, column=0, columnspan=4, sticky="ew",
+        server.grid(row=2, column=0, columnspan=2, sticky="ew",
                     padx=INNER, pady=(0, INNER))
         server.grid_columnconfigure(1, weight=1)
         ctk.CTkLabel(server, text="SERVER", font=label_font,
@@ -326,7 +328,7 @@ class LocalOCRApp(ctk.CTk, _DND_BASE):
 
     def _build_action(self) -> None:
         self.start_button = ctk.CTkButton(
-            self, text="Start OCR", height=50,
+            self.root_scroll, text="Start OCR", height=50,
             corner_radius=theme.RADIUS_CONTROL,
             font=self._font("heading", theme.SIZE_HEADING, "bold"),
             command=self.start_ocr,
@@ -335,7 +337,7 @@ class LocalOCRApp(ctk.CTk, _DND_BASE):
                                padx=PAD, pady=(0, GAP))
 
     def _build_progress(self) -> None:
-        self.status_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.status_frame = ctk.CTkFrame(self.root_scroll, fg_color="transparent")
         self.status_frame.grid_columnconfigure(0, weight=1)
 
         self.status_label = ctk.CTkLabel(
@@ -353,7 +355,7 @@ class LocalOCRApp(ctk.CTk, _DND_BASE):
         self.status_frame.grid_remove()
 
     def _build_panels(self) -> None:
-        self.bottom_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.bottom_frame = ctk.CTkFrame(self.root_scroll, fg_color="transparent")
         self.bottom_frame.grid(row=5, column=0, sticky="nsew",
                                padx=PAD, pady=(0, PAD))
         self.bottom_frame.grid_columnconfigure(0, weight=0)
@@ -387,7 +389,6 @@ class LocalOCRApp(ctk.CTk, _DND_BASE):
         self.tabview.add("Log")
         self.tabview.add("Result")
         self.tabview.add("Review")
-        self.tabview.add("Settings")
         self.tabview.set("Log")
         self.tabview.grid(row=0, column=1, sticky="nsew")
 
@@ -445,36 +446,80 @@ class LocalOCRApp(ctk.CTk, _DND_BASE):
             border_width=0, fg_color="transparent")
         self.review_text.grid(row=1, column=1, sticky="nsew", pady=4)
 
-        self._build_settings_tab(self.tabview.tab("Settings"))
+    def _build_settings_window(self) -> None:
+        """A separate, persistent window (opened from the ⚙ button in the
+        header) rather than a tab: appearance, model, and GPU are one-off
+        choices you set and forget, not something that needs to compete for
+        space with Log/Result/Review while a job is running.
 
-    def _build_settings_tab(self, parent) -> None:
-        """App-level preferences that don't belong in the per-run row above:
-        which processor Ollama should prefer, and what the DPI choice means."""
-        parent.grid_columnconfigure(0, weight=1)
-        parent.grid_rowconfigure(0, weight=1)
+        Built once, up front, and hidden immediately — never destroyed —
+        because start_ocr(), _persist() and friends read these widgets
+        (model_combobox, appearance_toggle, gpu_mode_segment,
+        gpu_index_entry) regardless of whether this window has ever been
+        opened.
+        """
+        window = ctk.CTkToplevel(self)
+        window.title("Settings")
+        window.geometry("520x760")
+        window.minsize(420, 480)
+        window.configure(fg_color=theme.SURFACE)
+        # Hide rather than destroy: closing the window must not invalidate
+        # the widgets other methods rely on for the app's whole lifetime.
+        window.protocol("WM_DELETE_WINDOW", window.withdraw)
+        self.settings_window = window
+
         label_font = self._font("ui", theme.SIZE_SMALL)
         value_font = self._font("ui", theme.SIZE_BODY)
 
-        scroll = ctk.CTkScrollableFrame(parent, fg_color="transparent")
-        scroll.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+        scroll = ctk.CTkScrollableFrame(window, fg_color="transparent")
+        scroll.pack(fill="both", expand=True, padx=PAD, pady=PAD)
         scroll.grid_columnconfigure(0, weight=1)
+
+        # ----------------------------------------------------- appearance
+        ctk.CTkLabel(
+            scroll, text="APPEARANCE", anchor="w",
+            font=self._font("heading", theme.SIZE_HEADING, "bold"),
+            text_color=theme.TEXT,
+        ).grid(row=0, column=0, sticky="w", pady=(4, 6))
+        self.appearance_toggle = ctk.CTkSegmentedButton(
+            scroll, values=["Light", "Dark"], width=140,
+            font=self._font("ui", theme.SIZE_SMALL),
+            command=self._on_appearance_change,
+        )
+        self.appearance_toggle.set(
+            "Dark" if self.prefs.get("appearance") == "dark" else "Light"
+        )
+        self.appearance_toggle.grid(row=1, column=0, sticky="w", pady=(0, 16))
+
+        # ----------------------------------------------------------- model
+        ctk.CTkLabel(
+            scroll, text="MODEL", anchor="w",
+            font=self._font("heading", theme.SIZE_HEADING, "bold"),
+            text_color=theme.TEXT,
+        ).grid(row=2, column=0, sticky="w", pady=(4, 6))
+        self.model_combobox = ctk.CTkComboBox(
+            scroll, values=list(config.EXAMPLE_MODELS), font=value_font,
+            height=34, command=lambda _v: self._persist(),
+        )
+        self.model_combobox.set(self.prefs.get("model") or "")
+        self.model_combobox.grid(row=3, column=0, sticky="ew", pady=(0, 16))
 
         # ---------------------------------------------------------- GPU
         ctk.CTkLabel(
             scroll, text="GPU", anchor="w",
             font=self._font("heading", theme.SIZE_HEADING, "bold"),
             text_color=theme.TEXT,
-        ).grid(row=0, column=0, sticky="w", pady=(4, 2))
+        ).grid(row=4, column=0, sticky="w", pady=(4, 2))
         ctk.CTkLabel(
             scroll, anchor="w", justify="left", wraplength=520,
             text=("Which processor Ollama should prefer for OCR. This is a "
                   "hint sent with every request, saved as your default — "
                   "Ollama still decides based on what's actually installed."),
             font=self._font("body", theme.SIZE_SMALL), text_color=theme.TEXT_MUTED,
-        ).grid(row=1, column=0, sticky="w", pady=(0, 8))
+        ).grid(row=5, column=0, sticky="w", pady=(0, 8))
 
         gpu_row = ctk.CTkFrame(scroll, fg_color="transparent")
-        gpu_row.grid(row=2, column=0, sticky="w", pady=(0, 4))
+        gpu_row.grid(row=6, column=0, sticky="w", pady=(0, 4))
         ctk.CTkLabel(gpu_row, text="MODE", font=label_font,
                      text_color=theme.TEXT_MUTED).grid(
             row=0, column=0, sticky="w", padx=(0, 8))
@@ -487,7 +532,7 @@ class LocalOCRApp(ctk.CTk, _DND_BASE):
         self.gpu_mode_segment.grid(row=0, column=1, sticky="w")
 
         index_row = ctk.CTkFrame(scroll, fg_color="transparent")
-        index_row.grid(row=3, column=0, sticky="w", pady=(0, 12))
+        index_row.grid(row=7, column=0, sticky="w", pady=(0, 12))
         ctk.CTkLabel(index_row, text="GPU INDEX", font=label_font,
                      text_color=theme.TEXT_MUTED).grid(
             row=0, column=0, sticky="w", padx=(0, 8))
@@ -513,20 +558,20 @@ class LocalOCRApp(ctk.CTk, _DND_BASE):
             scroll, text="DPI QUALITY GUIDE", anchor="w",
             font=self._font("heading", theme.SIZE_HEADING, "bold"),
             text_color=theme.TEXT,
-        ).grid(row=4, column=0, sticky="w", pady=(12, 2))
+        ).grid(row=8, column=0, sticky="w", pady=(12, 2))
         ctk.CTkLabel(
             scroll, anchor="w", justify="left", wraplength=520,
             text=("DPI controls how sharp each page is rendered before it's "
                   "sent off for recognition. Higher DPI reads finer detail "
                   "but takes longer and uses more memory per page."),
             font=self._font("body", theme.SIZE_SMALL), text_color=theme.TEXT_MUTED,
-        ).grid(row=5, column=0, sticky="w", pady=(0, 8))
+        ).grid(row=9, column=0, sticky="w", pady=(0, 8))
 
         for offset, (dpi, label, description) in enumerate(config.DPI_GUIDE):
             card = ctk.CTkFrame(
                 scroll, fg_color=theme.CARD, border_color=theme.CARD_BORDER,
                 border_width=1, corner_radius=theme.RADIUS_CONTROL)
-            card.grid(row=6 + offset, column=0, sticky="ew", pady=4)
+            card.grid(row=10 + offset, column=0, sticky="ew", pady=4)
             card.grid_columnconfigure(1, weight=1)
             ctk.CTkLabel(
                 card, text=str(dpi), width=56,
@@ -545,6 +590,8 @@ class LocalOCRApp(ctk.CTk, _DND_BASE):
                 font=self._font("body", theme.SIZE_SMALL),
                 text_color=theme.TEXT_MUTED,
             ).grid(row=1, column=1, sticky="ew", padx=(0, INNER), pady=(0, INNER - 4))
+
+        window.withdraw()  # built eagerly so its widgets exist; hidden until asked for
 
     # ----------------------------------------------------------------- GPU
 
@@ -570,6 +617,12 @@ class LocalOCRApp(ctk.CTk, _DND_BASE):
         except ValueError:
             return None
         return value if 0 <= value <= config.MAX_GPU_INDEX else None
+
+    def open_settings(self) -> None:
+        """Show the settings window, raising it if it's already open."""
+        self.settings_window.deiconify()
+        self.settings_window.lift()
+        self.settings_window.focus_force()
 
     # -------------------------------------------------------- drag & drop
 

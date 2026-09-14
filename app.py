@@ -1233,6 +1233,10 @@ class LocalOCRApp(ctk.CTk, _DND_BASE):
         self.status_frame.grid()
         self.progress.configure(mode="indeterminate")
         self.progress.start()
+        # The drop zone is already a no-op mid-run (_accept_paths bails out
+        # unless idle) — collapsing it too hands that space to Log/preview,
+        # where it's actually useful while a job is going.
+        self.dropzone.grid_remove()
 
     def _restore_idle(self) -> None:
         for widget in (self.select_button, self.select_folder_button,
@@ -1247,6 +1251,7 @@ class LocalOCRApp(ctk.CTk, _DND_BASE):
         self.progress.configure(mode="indeterminate")
         self.progress.set(0)
         self.status_frame.grid_remove()
+        self.dropzone.grid()
         self.status_label.configure(text="")
         self._render_phase_seen = False
         self._batch_index = 0

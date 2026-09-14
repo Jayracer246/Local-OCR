@@ -83,6 +83,17 @@ class TestProgressBarGui(unittest.TestCase):
         self.assertEqual(self.app.progress.get(), 0)
         self.assertEqual(self.app.status_label.cget("text"), "")
 
+    def test_busy_state_collapses_the_drop_zone(self):
+        self.assertNotEqual(self.app.dropzone.grid_info(), {})
+        self.app._apply_ocr_busy_state()
+        self.assertEqual(self.app.dropzone.grid_info(), {})
+
+    def test_restore_idle_brings_back_the_drop_zone(self):
+        self.app._apply_ocr_busy_state()
+        self.assertEqual(self.app.dropzone.grid_info(), {})
+        self.app._restore_idle()
+        self.assertNotEqual(self.app.dropzone.grid_info(), {})
+
     def test_busy_state_resets_render_phase_flag(self):
         self._progress("render", 1, 2)  # sets _render_phase_seen = True
         self.app._restore_idle()

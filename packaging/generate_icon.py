@@ -93,13 +93,13 @@ def build_master() -> Image.Image:
     # "Fatter" than the font's own bold weight: draw it with a same-colour
     # stroke around the glyph, which bulks up every stroke of the letter
     # rather than just picking a heavier font file.
-    n_font = ImageFont.truetype(font_path, int(SIZE * 1.05))
-    n_fatten = int(SIZE * 0.028)
+    n_font = ImageFont.truetype(font_path, int(SIZE * 1.15))
+    n_fatten = int(SIZE * 0.045)
     probe = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
     bbox = probe.textbbox((0, 0), "N", font=n_font, stroke_width=n_fatten)
     n_w, n_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
     n_x = (SIZE - n_w) / 2 - bbox[0]
-    n_y = SIZE * 0.40 - n_h / 2 - bbox[1]
+    n_y = SIZE * 0.5 - n_h / 2 - bbox[1]  # centred in the icon
 
     shadow_offset = int(SIZE * 0.02)
     shadow_layer = Image.new("RGBA", (SIZE, SIZE), (0, 0, 0, 0))
@@ -117,17 +117,27 @@ def build_master() -> Image.Image:
     base = Image.alpha_composite(base, n_layer)
     _clip_to_badge(base, mask)
 
-    # ---- OCR wordmark: white fill, black outline ----
+    # ---- OCR wordmark: white fill, thicker black outline, drop shadow ----
     ocr_font = ImageFont.truetype(font_path, int(SIZE * 0.165))
-    obbox = probe.textbbox((0, 0), "OCR", font=ocr_font)
+    ocr_stroke = max(2, int(SIZE * 0.013)) + 32  # outline thickened ~4pt-equivalent
+    obbox = probe.textbbox((0, 0), "OCR", font=ocr_font, stroke_width=ocr_stroke)
     o_w, o_h = obbox[2] - obbox[0], obbox[3] - obbox[1]
     o_x = (SIZE - o_w) / 2 - obbox[0]
     o_y = SIZE * 0.5 - o_h / 2 - obbox[1]
 
+    ocr_shadow_offset = int(SIZE * 0.016)
+    ocr_shadow = Image.new("RGBA", (SIZE, SIZE), (0, 0, 0, 0))
+    ImageDraw.Draw(ocr_shadow).text(
+        (o_x + ocr_shadow_offset, o_y + ocr_shadow_offset * 1.4), "OCR",
+        font=ocr_font, fill=(0, 0, 0, 140),
+        stroke_width=ocr_stroke, stroke_fill=(0, 0, 0, 140))
+    ocr_shadow = ocr_shadow.filter(ImageFilter.GaussianBlur(SIZE * 0.012))
+    base = Image.alpha_composite(base, ocr_shadow)
+
     ocr_layer = Image.new("RGBA", (SIZE, SIZE), (0, 0, 0, 0))
     ImageDraw.Draw(ocr_layer).text(
         (o_x, o_y), "OCR", font=ocr_font, fill=WHITE + (255,),
-        stroke_width=max(2, int(SIZE * 0.013)), stroke_fill=INK + (255,))
+        stroke_width=ocr_stroke, stroke_fill=INK + (255,))
     base = Image.alpha_composite(base, ocr_layer)
     _clip_to_badge(base, mask)
 

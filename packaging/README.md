@@ -112,6 +112,13 @@ iscc packaging\windows_installer.iss
   works the same offline-or-not way it always has once Ollama is up —
   pulling a model is a separate, deliberate step for whoever sets up the
   offline machine, same as today.
-- **No app icon yet** — `packaging/app.spec` has `icon=None`; drop an
-  `.ico`/`.icns` into `packaging/` and point the spec at it whenever one
-  exists.
+
+## App icon
+
+`packaging/icon.png` / `icon.ico` / `icon.icns` — generated from a single
+1024×1024 master with Pillow (`packaging/app.spec` already points the
+Windows `EXE` and macOS `BUNDLE` steps at the `.ico`/`.icns`; Linux has no
+equivalent binary-embedded icon, so `~/.local/share/applications/*.desktop`
+`Icon=` points at the PNG directly instead). Regenerate by editing the
+master and rerunning Pillow's resize/save — there's no source PSD/SVG,
+just the raster master.

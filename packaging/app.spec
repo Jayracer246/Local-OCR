@@ -69,7 +69,10 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,  # add packaging/icon.ico / icon.icns here once one exists
+    # .ico on Windows only — macOS gets its icon via BUNDLE() below instead,
+    # and a Linux ELF binary has nowhere to embed one (the .desktop entry's
+    # Icon= is what matters there).
+    icon=(str(ROOT / "packaging" / "icon.ico") if sys.platform.startswith("win") else None),
 )
 
 coll = COLLECT(
@@ -88,7 +91,7 @@ if sys.platform == "darwin":
     app = BUNDLE(
         coll,
         name="Local OCR.app",
-        icon=None,
+        icon=str(ROOT / "packaging" / "icon.icns"),
         bundle_identifier="com.local-ocr.app",
         info_plist={
             "NSHighResolutionCapable": "True",

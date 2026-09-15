@@ -4,12 +4,11 @@
 #     python3 -m venv .lockenv
 #     .lockenv/bin/pip install -r requirements.txt
 #     .lockenv/bin/pip freeze > requirements.lock
-#
-# Direct dependencies
 customtkinter==6.0.0
 ollama==0.6.2
 pillow==12.3.0
 pymupdf==1.28.2
+tkinterdnd2==0.4.4.1
 
 # Transitive dependencies
 annotated-types==0.8.0

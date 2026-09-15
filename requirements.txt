@@ -18,3 +18,8 @@ ollama>=0.6.2,<1
 # ocr_service imports it directly to validate URLs with the same parser the
 # HTTP client will use.
 httpx>=0.28.1,<1
+
+# Drag and drop. Imported defensively — if the Tcl extension will not load
+# on a given machine the app runs without a drop target rather than failing
+# to start, so this is a soft dependency in practice.
+tkinterdnd2>=0.4.3,<0.5

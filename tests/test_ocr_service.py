@@ -431,6 +431,30 @@ class TestValidateOutputDir(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not writable"):
             ocr_service.validate_output_dir(locked)
 
+class TestBuildOllamaOptions(unittest.TestCase):
+    def test_auto_sends_no_overrides(self):
+        self.assertEqual(ocr_service.build_ollama_options("auto"), {})
+        self.assertEqual(ocr_service.build_ollama_options("auto", 2), {})
+
+    def test_cpu_forces_num_gpu_zero(self):
+        self.assertEqual(ocr_service.build_ollama_options("cpu"), {"num_gpu": 0})
+        # A GPU index is meaningless once every layer is forced to CPU.
+        self.assertEqual(ocr_service.build_ollama_options("cpu", 3), {"num_gpu": 0})
+
+    def test_gpu_without_index_requests_max_offload_only(self):
+        self.assertEqual(ocr_service.build_ollama_options("gpu"), {"num_gpu": -1})
+
+    def test_gpu_with_index_adds_main_gpu_hint(self):
+        self.assertEqual(
+            ocr_service.build_ollama_options("gpu", 1),
+            {"num_gpu": -1, "main_gpu": 1},
+        )
+
+    def test_unknown_mode_is_treated_as_auto(self):
+        """Anything unrecognised must fail safe to "don't override", not raise."""
+        self.assertEqual(ocr_service.build_ollama_options("quantum"), {})
+
+
 class TestMakeClient(unittest.TestCase):
     def test_redirects_disabled(self):
         """A loopback URL is not enough on its own.
@@ -980,6 +1004,23 @@ class TestRecognizeImages(unittest.TestCase):
             )
         first, second = (c.kwargs["messages"] for c in client.chat.call_args_list)
         self.assertIsNot(first, second)
+
+    def test_options_forwarded_verbatim_to_every_chat_call(self):
+        client = mock.MagicMock()
+        client.chat.side_effect = [stream_response("a"), stream_response("b")]
+        gpu_options = {"num_gpu": -1, "main_gpu": 1}
+        ocr_service.recognize_images(
+            client, self.MODEL, pages(2), lambda _m: None, options=gpu_options,
+        )
+        for call in client.chat.call_args_list:
+            self.assertEqual(call.kwargs["options"], gpu_options)
+
+    def test_no_options_sends_none_rather_than_an_empty_dict(self):
+        """An empty override dict must not be sent as a literal no-op options={}."""
+        client = mock.MagicMock()
+        client.chat.side_effect = [stream_response("a")]
+        ocr_service.recognize_images(client, self.MODEL, pages(1), lambda _m: None)
+        self.assertIsNone(client.chat.call_args.kwargs["options"])
 
     def test_image_payload_is_bytes_not_a_path(self):
         """The page never exists as a file, so nothing path-shaped may be sent."""
@@ -1592,6 +1633,26 @@ class TestProcessOcr(unittest.TestCase):
         self.assertEqual(logs[0], "[1/3] Preparing image...")
         self.assertIn("[2/3] Sending page 1/1 to Ollama...", logs)
         self.assertIn("[3/3] Saving Markdown...", logs)
+
+    def test_gpu_mode_on_the_request_reaches_the_chat_call(self):
+        """End-to-end: OCRRequest.gpu_mode -> build_ollama_options -> chat()."""
+        input_path = self.dir / "photo.png"
+        input_path.write_bytes(TINY_PNG)
+        request = OCRRequest(
+            input_path=input_path,
+            output_path=ocr_service.build_output_path(input_path),
+            ollama_url=self.URL, model=self.MODEL, dpi=150,
+            gpu_mode="gpu", gpu_index=1,
+        )
+        events = queue.Queue()
+        with mock.patch.object(ocr_service.ollama, "Client") as client_cls:
+            arm_version_probe(client_cls)
+            client_cls.return_value.chat.return_value = stream_response("text")
+            ocr_service.process_ocr(request, events)
+        self.assertEqual(
+            client_cls.return_value.chat.call_args.kwargs["options"],
+            {"num_gpu": -1, "main_gpu": 1},
+        )
 
     def test_pdf_pipeline_order_join_and_no_disk_residue(self):
         request = self.make_request("doc.pdf", dpi=300)

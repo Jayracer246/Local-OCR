@@ -38,12 +38,12 @@ class TestCompletionDialogGui(unittest.TestCase):
     def test_on_ocr_success_uses_dialog_not_messagebox(self):
         with mock.patch.object(self.app, "_show_completion_dialog") as dialog:
             self.app.on_ocr_success("/tmp/out.md")
-        dialog.assert_called_once_with("/tmp/out.md")
+        dialog.assert_called_once_with(["/tmp/out.md"])
         self.messagebox.showinfo.assert_not_called()
 
     def test_show_completion_dialog_builds_a_toplevel(self):
         before = self.app.winfo_children()
-        self.app._show_completion_dialog("/tmp/out.md")
+        self.app._show_completion_dialog(["/tmp/out.md"])
         toplevels = [
             w for w in self.app.winfo_children()
             if isinstance(w, ctk.CTkToplevel) and w not in before

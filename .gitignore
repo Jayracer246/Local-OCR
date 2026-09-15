@@ -31,5 +31,12 @@ AGENTS.md
 docs/
 build-mac.sh
 
+# PyInstaller build output and fetched vendor binaries (fetched fresh by
+# packaging/build_*.sh — see packaging/README.md — never committed: the
+# vendored Ollama binary alone runs well over a gigabyte).
+/build/
+/dist/
+packaging/vendor/
+
 # Syncthing
 .syncthing.*

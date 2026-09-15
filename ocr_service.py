@@ -64,6 +64,8 @@ class OCRRequest:
     ollama_url: str
     model: str
     dpi: int
+    gpu_mode: str = config.GPU_MODE_AUTO
+    gpu_index: int | None = None
 
 
 def is_loopback_host(hostname: str | None) -> bool:
@@ -300,6 +302,32 @@ def validate_output_dir(path: Path) -> None:
         raise ValueError(f"Not a folder: {path}")
     if not os.access(path, os.W_OK | os.X_OK):
         raise ValueError(f"Folder is not writable: {path}")
+
+
+def build_ollama_options(gpu_mode: str, gpu_index: int | None = None) -> dict:
+    """Translate the app's GPU setting into Ollama's per-request options.
+
+    Ollama's ``/api/chat`` (and ``/api/generate``) accept an ``options``
+    object at request time — no server restart or Modelfile edit needed:
+
+    * ``"auto"`` sends nothing, leaving Ollama's own placement decision
+      alone. This is the safe default and matches pre-existing behaviour.
+    * ``"cpu"`` sends ``num_gpu=0``, which forces every layer onto system
+      memory instead of VRAM.
+    * ``"gpu"`` sends ``num_gpu=-1`` (as many layers as fit in VRAM), and,
+      if a card index was given, ``main_gpu`` as a hint for which one to
+      prefer on a multi-GPU machine. ``main_gpu`` is best-effort: Ollama's
+      scheduler has not always honoured it for placement on every version,
+      so treat it as a preference rather than a guarantee.
+    """
+    if gpu_mode == config.GPU_MODE_CPU:
+        return {"num_gpu": 0}
+    if gpu_mode == config.GPU_MODE_GPU:
+        options: dict = {"num_gpu": -1}
+        if gpu_index is not None:
+            options["main_gpu"] = gpu_index
+        return options
+    return {}
 
 
 def make_client(url: str, timeout: int) -> "ollama.Client":
@@ -577,8 +605,14 @@ def recognize_images(
     progress_callback: ProgressCallback | None = None,
     event_callback: EventCallback | None = None,
     cancel_event=None,
+    options: dict | None = None,
 ) -> list[str]:
     """Send one independent chat request per page; return texts in order.
+
+    ``options`` is passed straight through to every ``client.chat`` call —
+    see ``build_ollama_options`` for how the app's GPU setting becomes this
+    dict. ``None``/empty means "don't override anything Ollama would do by
+    default".
 
     ``pages`` is consumed lazily, so for a PDF each page is rendered only
     when this function reaches it and is released immediately afterwards.
@@ -627,6 +661,7 @@ def recognize_images(
                     },
                 ],
                 stream=True,
+                options=options or None,
             )
             for chunk in stream:
                 _raise_if_cancelled(cancel_event)
@@ -833,6 +868,7 @@ def process_ocr(request: OCRRequest, event_queue, cancel_event=None) -> Path:
             progress,
             emit_event,
             cancel_event,
+            build_ollama_options(request.gpu_mode, request.gpu_index),
         )
 
     _raise_if_cancelled(cancel_event)
@@ -846,3 +882,98 @@ def process_ocr(request: OCRRequest, event_queue, cancel_event=None) -> Path:
         )
     save_markdown_atomic(request.output_path, content)
     return request.output_path
+
+
+# ---------------------------------------------------------------- batch
+
+
+@dataclass(frozen=True)
+class BatchOutcome:
+    """What happened to every document in one batch run."""
+
+    completed: list[Path]
+    failures: list[tuple[Path, str]]
+
+    @property
+    def total(self) -> int:
+        return len(self.completed) + len(self.failures)
+
+
+def collect_inputs(paths: Iterable[Path], recursive: bool = False) -> list[Path]:
+    """Expand a mix of files and folders into supported documents, sorted.
+
+    Folders contribute the supported files they contain; anything whose
+    extension is not supported is skipped silently, because a folder full of
+    other things is the normal case rather than an error. Symlinked
+    directories are not followed, so a loop in the tree cannot hang the scan.
+    Duplicates are removed by resolved path, so dropping both a folder and a
+    file inside it processes that file once.
+    """
+    seen: dict[Path, Path] = {}
+    for entry in paths:
+        if entry.is_dir():
+            walker = entry.rglob("*") if recursive else entry.glob("*")
+            for candidate in walker:
+                if (candidate.is_file()
+                        and candidate.suffix.lower() in config.SUPPORTED_EXTENSIONS):
+                    seen.setdefault(candidate.resolve(), candidate)
+        elif entry.is_file() and entry.suffix.lower() in config.SUPPORTED_EXTENSIONS:
+            seen.setdefault(entry.resolve(), entry)
+    return sorted(seen.values(), key=lambda p: str(p).lower())
+
+
+def process_batch(
+    requests: list[OCRRequest],
+    event_queue,
+    cancel_event=None,
+) -> BatchOutcome:
+    """Run several documents in one pass, reporting progress per file.
+
+    One bad document does not end the batch. A corrupt PDF or an image that
+    fails verification is recorded and the run moves to the next file —
+    losing forty finished documents because the forty-first was malformed
+    would be the wrong trade. Cancellation is the exception: it stops
+    everything, because the user asked it to.
+
+    Emits ``file_start`` / ``file_done`` / ``file_failed`` events alongside
+    the per-page events ``process_ocr`` already produces, so the UI can show
+    both "file 3 of 12" and "page 4 of 9" at once.
+    """
+    completed: list[Path] = []
+    failures: list[tuple[Path, str]] = []
+    total = len(requests)
+
+    for index, request in enumerate(requests, start=1):
+        _raise_if_cancelled(cancel_event)
+        event_queue.put((
+            "file_start",
+            {"index": index, "total": total, "name": request.input_path.name},
+        ))
+        try:
+            saved = process_ocr(request, event_queue, cancel_event)
+        except OCRCancelled:
+            raise
+        except Exception as exc:
+            failures.append((request.input_path, str(exc)))
+            event_queue.put((
+                "file_failed",
+                {
+                    "index": index,
+                    "total": total,
+                    "name": request.input_path.name,
+                    "error": str(exc),
+                },
+            ))
+        else:
+            completed.append(saved)
+            event_queue.put((
+                "file_done",
+                {
+                    "index": index,
+                    "total": total,
+                    "name": request.input_path.name,
+                    "output": str(saved),
+                },
+            ))
+
+    return BatchOutcome(completed=completed, failures=failures)

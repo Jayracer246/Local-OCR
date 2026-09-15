@@ -13,6 +13,9 @@ it talk to another host.
 ## Requirements
 
 - Python 3.10 or newer with Tkinter support (macOS, Linux, or Windows).
+  Drag and drop needs `tkinterdnd2`, which is installed with the other
+  dependencies; if its Tcl extension will not load on your system the app
+  still runs and only the drop target is missing.
   Both Tk 8.6 and Tk 9.0 work with the pinned customtkinter version
   (customtkinter 6.x; older 5.2.x renders blank windows under Tk 9.0 on
   macOS).
@@ -84,8 +87,10 @@ inference, use a tool that was designed for it.
 
 ## Usage
 
-1. `Select File` — choose one PDF or image (`.pdf`, `.png`, `.jpg`, `.jpeg`,
-   `.webp`).
+1. **Drop files or a folder onto the window**, or use `Choose files` /
+   `Choose folder`. Multiple documents can be queued at once; dropping a
+   folder picks up every supported file in it. Anything that is not a PDF,
+   PNG, JPEG or WebP is skipped and listed in the Log.
 2. Confirm the server URL, pick or type a model tag, and choose a PDF DPI
    (100/150/200/300; higher is sharper but slower — DPI only affects PDFs).
 3. `Start OCR`. Each PDF page is rendered and sent to the model in order.
@@ -110,7 +115,19 @@ While a job runs you can follow it in several places:
   side by side, with `◀` / `▶` navigation for spot-checking quality.
 
 While a job is running, `Start OCR` becomes `Cancel`. Cancelling stops after
-the current page and writes no output file.
+the current page and writes no further output.
+
+With several documents queued, progress reads `File 3 of 7 · page 4 of 11`.
+**One bad document does not end the run** — a corrupt PDF is recorded in the
+Log and the batch moves on, because losing forty finished documents to a
+malformed forty-first would be the wrong trade. The summary at the end says
+how many succeeded.
+
+Model, quality, output folder, appearance and window size are remembered
+between launches, in `~/.config/local-ocr/settings.json` (XDG-respecting;
+`~/Library/Application Support` on macOS, `%APPDATA%` on Windows). The file
+holds preferences only — **the server address is never stored there**, so no
+edit to it can point the app at a different host.
 
 On success the app switches to the Result tab and shows a dialog with `Open`
 (open the `.md` in your default app), `Show in Finder` (or `Open Folder` off
@@ -175,5 +192,7 @@ a tool whose whole point is staying local they are worth stating plainly:
 | `its contents are not a PNG, JPEG or WebP image` | The file's extension does not match what it actually is. The real format is what gets decoded, so the app goes by content, not by name. |
 | `above the … megapixel limit` | The page is enormous at this DPI. The message suggests a DPI that fits; a lower one also renders faster. |
 | `above the 2000-page limit` | Split the PDF and run the parts separately. |
+| Drag and drop does nothing | `tkinterdnd2`'s Tcl extension did not load. Use `Choose files` / `Choose folder` instead; everything else works. |
+| Settings not remembered | The config file could not be written. Check permissions on `~/.config/local-ocr/`. |
 | `model not found` | The tag is not installed on that server. Check `ollama list` and `ollama pull <tag>` on the server. Models are never pulled automatically. |
 | Empty or garbage output / "returned no text" | The selected model has no vision support. Choose a vision-capable model. |

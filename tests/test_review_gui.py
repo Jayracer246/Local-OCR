@@ -57,7 +57,7 @@ class TestReviewGui(unittest.TestCase):
 
     def test_first_page_shown_and_boundaries(self):
         self._feed(1, 3, "one")
-        self.assertEqual(self._label(), "Page 1 / 3")
+        self.assertEqual(self._label(), "Page 1 of 3")
         self.assertEqual(self._review_text(), "one")
         # Only one page ready → both nav buttons disabled.
         self.assertEqual(self.app.review_prev_button.cget("state"), "disabled")
@@ -68,35 +68,35 @@ class TestReviewGui(unittest.TestCase):
         self._feed(2, 3, "two")
         self._feed(3, 3, "three")
         # Still viewing page 1; next is now enabled, prev still disabled.
-        self.assertEqual(self._label(), "Page 1 / 3")
+        self.assertEqual(self._label(), "Page 1 of 3")
         self.assertEqual(self.app.review_prev_button.cget("state"), "disabled")
         self.assertEqual(self.app.review_next_button.cget("state"), "normal")
 
         self.app.review_next()
-        self.assertEqual(self._label(), "Page 2 / 3")
+        self.assertEqual(self._label(), "Page 2 of 3")
         self.assertEqual(self._review_text(), "two")
         self.assertEqual(self.app.review_prev_button.cget("state"), "normal")
 
         self.app.review_next()
-        self.assertEqual(self._label(), "Page 3 / 3")
+        self.assertEqual(self._label(), "Page 3 of 3")
         self.assertEqual(self._review_text(), "three")
         self.assertEqual(self.app.review_next_button.cget("state"), "disabled")
 
         self.app.review_prev()
-        self.assertEqual(self._label(), "Page 2 / 3")
+        self.assertEqual(self._label(), "Page 2 of 3")
         self.assertEqual(self._review_text(), "two")
 
     def test_navigation_does_not_overrun_boundaries(self):
         self._feed(1, 1, "only")
         self.app.review_prev()  # no-op at the left edge
         self.app.review_next()  # no-op at the right edge
-        self.assertEqual(self._label(), "Page 1 / 1")
+        self.assertEqual(self._label(), "Page 1 of 1")
         self.assertEqual(self._review_text(), "only")
 
     def test_page_without_image_still_navigable(self):
         """A page whose thumbnail failed shows its text with a blank image."""
         self._feed(1, 1, "text only", with_image=False)
-        self.assertEqual(self._label(), "Page 1 / 1")
+        self.assertEqual(self._label(), "Page 1 of 1")
         self.assertEqual(self._review_text(), "text only")
 
     def test_new_run_clears_review(self):

@@ -89,24 +89,31 @@ def build_master() -> Image.Image:
     dark_overlay.putalpha(vignette.point(lambda p: int(p * 0.5)))
     base = Image.alpha_composite(base, dark_overlay)
 
-    # ---- big N, with a drop shadow behind it ----
-    n_font = ImageFont.truetype(font_path, int(SIZE * 0.95))
+    # ---- big, fat N, with a drop shadow behind it ----
+    # "Fatter" than the font's own bold weight: draw it with a same-colour
+    # stroke around the glyph, which bulks up every stroke of the letter
+    # rather than just picking a heavier font file.
+    n_font = ImageFont.truetype(font_path, int(SIZE * 1.05))
+    n_fatten = int(SIZE * 0.028)
     probe = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
-    bbox = probe.textbbox((0, 0), "N", font=n_font)
+    bbox = probe.textbbox((0, 0), "N", font=n_font, stroke_width=n_fatten)
     n_w, n_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
     n_x = (SIZE - n_w) / 2 - bbox[0]
-    n_y = SIZE * 0.36 - n_h / 2 - bbox[1]
+    n_y = SIZE * 0.40 - n_h / 2 - bbox[1]
 
-    shadow_offset = int(SIZE * 0.018)
+    shadow_offset = int(SIZE * 0.02)
     shadow_layer = Image.new("RGBA", (SIZE, SIZE), (0, 0, 0, 0))
     ImageDraw.Draw(shadow_layer).text(
         (n_x + shadow_offset, n_y + shadow_offset * 1.6), "N",
-        font=n_font, fill=(0, 0, 0, 150))
+        font=n_font, fill=(0, 0, 0, 150),
+        stroke_width=n_fatten, stroke_fill=(0, 0, 0, 150))
     shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(SIZE * 0.014))
     base = Image.alpha_composite(base, shadow_layer)
 
     n_layer = Image.new("RGBA", (SIZE, SIZE), (0, 0, 0, 0))
-    ImageDraw.Draw(n_layer).text((n_x, n_y), "N", font=n_font, fill=WHITE + (255,))
+    ImageDraw.Draw(n_layer).text(
+        (n_x, n_y), "N", font=n_font, fill=WHITE + (255,),
+        stroke_width=n_fatten, stroke_fill=WHITE + (255,))
     base = Image.alpha_composite(base, n_layer)
     _clip_to_badge(base, mask)
 
@@ -115,7 +122,7 @@ def build_master() -> Image.Image:
     obbox = probe.textbbox((0, 0), "OCR", font=ocr_font)
     o_w, o_h = obbox[2] - obbox[0], obbox[3] - obbox[1]
     o_x = (SIZE - o_w) / 2 - obbox[0]
-    o_y = SIZE * 0.855 - o_h / 2 - obbox[1]
+    o_y = SIZE * 0.5 - o_h / 2 - obbox[1]
 
     ocr_layer = Image.new("RGBA", (SIZE, SIZE), (0, 0, 0, 0))
     ImageDraw.Draw(ocr_layer).text(
